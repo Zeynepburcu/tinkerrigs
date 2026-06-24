@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Tinker Rigs — Build Things That Move</title>
 <style>
   :root{
@@ -15,7 +15,9 @@
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
   html,body{margin:0;height:100%;overflow:hidden;font-family:"Quicksand","Trebuchet MS",system-ui,sans-serif;color:var(--ink);}
   body{background:linear-gradient(170deg,var(--sky),var(--sky2));user-select:none;touch-action:none;}
-  #app{display:flex;flex-direction:column;height:100%;}
+  /* iOS Safari collapses a 100%-height flex chain, so use the dynamic viewport
+     unit (dvh) which excludes the browser chrome; 100vh is the fallback. */
+  #app{display:flex;flex-direction:column;height:100vh;height:100dvh;}
 
   /* HEADER */
   header{display:flex;align-items:center;gap:12px;padding:10px 16px;}
@@ -30,7 +32,7 @@
   /* MAIN — the stage fills the whole area; the tray floats over it as an
      overlay. Collapsing the tray therefore never resizes the canvas, which is
      what was shearing the drawing mid-transition. */
-  main{flex:1;position:relative;padding:0 12px 12px;min-height:0;}
+  main{flex:1;position:relative;padding:0 12px calc(12px + env(safe-area-inset-bottom));min-height:0;}
 
   /* TRAY — absolutely positioned overlay on the left. Slides out via transform
      (GPU compositing, no reflow), so nothing else on screen moves or skews. */
@@ -229,10 +231,10 @@ function beamTiltFor(it){
 /* ---------- PART DEFINITIONS ----------
    Each part type has an icon (SVG) and physics behavior. */
 const PARTS = {
-  block:  {name:'Block',  color:'#FFC93C', kind:'box',   w:1,h:1, mass:1},
-  beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:2,h:1, mass:1.4},
   wheel:  {name:'Wheel',  color:'#5E4585', kind:'wheel', w:1,h:1, mass:.8, r:.5},
   bigwheel:{name:'Big Wheel',color:'#7B5EA7',kind:'wheel',w:2,h:2, mass:1.2, r:1},
+  block:  {name:'Block',  color:'#FFC93C', kind:'box',   w:1,h:1, mass:1},
+  beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:2,h:1, mass:1.4},
   motor:  {name:'Motor',  color:'#3FC1B7', kind:'motor', w:1,h:1, mass:1.2},
   booster:{name:'Booster',color:'#5EC2E8', kind:'booster',w:1,h:1, mass:.6},
   weight: {name:'Weight', color:'#6B5B73', kind:'weight',w:1,h:1, mass:3},
