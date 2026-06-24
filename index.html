@@ -134,7 +134,7 @@ const PARTS = {
   wheel:  {name:'Wheel',  color:'#5E4585', kind:'wheel', w:1,h:1, mass:.8, r:.5},
   bigwheel:{name:'Big Wheel',color:'#7B5EA7',kind:'wheel',w:2,h:2, mass:1.2, r:1},
   block:  {name:'Block',  color:'#FFC93C', kind:'box',   w:1,h:1, mass:1},
-  beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:2,h:1, mass:1.4},
+  beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:3,h:1, mass:1.4},
   motor:  {name:'Motor',  color:'#3FC1B7', kind:'motor', w:1,h:1, mass:1.2},
   booster:{name:'Booster',color:'#5EC2E8', kind:'booster',w:1,h:1, mass:.6},
   weight: {name:'Weight', color:'#6B5B73', kind:'weight',w:1,h:1, mass:3},
@@ -235,10 +235,14 @@ function cellAt(px,py){
   const p=PARTS[selectedType];
   let gx=Math.round((px-p.w*GRID/2)/GRID);
   let gy=Math.round((py-p.h*GRID/2)/GRID);
+  // Keep pieces clear of the parts tray, whichever edge it's docked to: a wide
+  // tray is the mobile top bar (reserve rows below it); otherwise it's the left
+  // sidebar (reserve columns to its right).
+  const topBar = tray.offsetWidth > tray.offsetHeight;
+  const minGx = topBar ? 0 : Math.ceil((tray.offsetWidth+24)/GRID);
+  const minGy = topBar ? Math.ceil((tray.offsetHeight+16)/GRID) : 0;
   const maxgy=Math.floor(groundY/GRID)-p.h;
-  gy=Math.max(0,Math.min(gy,maxgy));
-  // left edge starts past the parts tray so pieces aren't hidden under it
-  const minGx=Math.ceil((tray.offsetWidth+24)/GRID);
+  gy=Math.max(minGy,Math.min(gy,maxgy));
   gx=Math.max(minGx,Math.min(gx,Math.floor(W/GRID)-p.w));
   let ok=true;
   for(const o of placed){
@@ -349,10 +353,13 @@ const GRAV=0.55;
 // battery fades the thrust dies and gravity brings the rig back down. Tune
 // BOOST_LIFT for how strongly it flies (must stay > GRAV to leave the ground).
 const BOOST_LIFT=0.9;
-// Spring = SOFT SUSPENSION. Its vertical edges + diagonals are springy (low
-// stick stiffness) so the part squishes under load and rebounds, cushioning
-// bumps. Lower = squishier/bouncier.
-const SPRING_STIFF=0.18;
+// Spring = SOFT SUSPENSION. It squishes only along ONE axis (the one the white
+// coil lines run perpendicular to — i.e. vertically). The two edges along that
+// axis are soft springs (SPRING_STIFF); the cross plates stay rigid so the width
+// can't change, and stiff diagonal braces (SPRING_BRACE) stop it leaning/shearing
+// so it can't squish sideways. Lower SPRING_STIFF = squishier.
+const SPRING_STIFF=0.14;
+const SPRING_BRACE=0.55;
 // Motor battery: runs at full for (MOTOR_RUN-MOTOR_FADE) frames, then eases down
 // to zero across MOTOR_FADE frames so the rig coasts to a smooth stop. ~60fps.
 // Boosters draw from this same battery, so flight and drive fade together.
@@ -423,11 +430,13 @@ function buildPhysics(){
       const c=node(it.gx+p.w,it.gy+p.h,{mass:p.mass/4});
       const d=node(it.gx,it.gy+p.h,{mass:p.mass/4});
       if(it.type==='spring'){
-        // soft suspension: firm top & bottom plates, but springy sides and
-        // diagonals so the part compresses under load and springs back
-        addStick(a,b,1); addStick(c,d,1);
-        addStick(b,c,SPRING_STIFF); addStick(d,a,SPRING_STIFF);
-        addStick(a,c,SPRING_STIFF); addStick(b,d,SPRING_STIFF);
+        // soft suspension that squishes ONLY along the vertical axis:
+        //   top & bottom plates rigid  -> width can't change
+        //   left & right edges soft    -> the one axis it compresses on
+        //   diagonals stiff braces     -> can't lean/shear (no sideways squish)
+        addStick(a,b,1); addStick(d,c,1);                        // rigid plates
+        addStick(d,a,SPRING_STIFF); addStick(c,b,SPRING_STIFF);  // soft squish axis
+        addStick(a,c,SPRING_BRACE); addStick(b,d,SPRING_BRACE);  // anti-shear braces
       } else {
         addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
       }
@@ -439,6 +448,10 @@ function buildPhysics(){
   // Second pass: now that every chassis node exists, attach each wheel's axle
   // to the structure around it.
   for(const w of wheelsList){ attachToStructure(w.hub, nodeMap, w.it, w.p); }
+  // Boosters: bolt every corner to all nearby structure nodes, not just the two
+  // grid-shared ones. A lone booster otherwise hinges on a single shared edge and
+  // its thrust spins the rig; bracing the whole contact surface makes it lift flat.
+  for(const b of boosters){ braceToStructure(b.nodes, nodeMap); }
   // motors power the closest wheel
   for(const it of placed){ if(it.type==='motor'){
     const mx=(it.gx+.5)*GRID, my=(it.gy+.5)*GRID;
@@ -470,6 +483,21 @@ function attachToStructure(hub,nodeMap,it,p){
     if(d<GRID*3){ addStick(w.hub,hub,.8); }
   }
   hub.connected=connected;
+}
+
+function braceToStructure(nodes, nodeMap){
+  // Stiffly tie each of the part's corners to every other structure node within
+  // reach (one cell away), so the part fuses to the whole surface it touches
+  // rather than hanging off a single shared edge.
+  const reach = GRID*1.5;
+  for(const n of nodes){
+    for(const k in nodeMap){
+      const m=nodeMap[k];
+      if(m===n) continue;
+      const d=Math.hypot(m.x-n.x, m.y-n.y);
+      if(d>0.001 && d<reach){ addStick(n,m,1); }
+    }
+  }
 }
 
 let animTime=0;

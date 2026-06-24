@@ -88,9 +88,18 @@ canvas{display:block;width:100%;height:100%;position:absolute;inset:0;z-index:1;
 @media (max-width:560px){
   header{padding:8px 10px;gap:8px;}
   .logo{font-size:20px;}
-  .tray{width:84px;}
-  .part-btn .ic{width:40px;height:40px;}
+  /* On phones the parts tray becomes a horizontal bar across the TOP and the
+     parts scroll sideways. It still slides away (upward now) during play. */
+  .tray{left:12px;right:12px;top:0;bottom:auto;width:auto;
+    flex-direction:row;-webkit-flex-direction:row;gap:8px;
+    padding:8px 10px;overflow-x:auto;overflow-y:hidden;}
+  .tray.hidden{transform:translateY(calc(-100% - 16px));}
+  .tray h2{display:none;}                 /* save horizontal space */
+  .part-btn{padding:6px 8px;}
+  .part-btn .ic{width:36px;height:36px;}
   .part-btn .nm{font-size:9px;}
+  /* keep build-mode hints from hiding under the top bar */
+  .hint{top:96px;}
   .tagline{display:none;}
   .btn.go{font-size:18px;padding:12px 24px;}
   .btn.icon{font-size:18px;padding:8px 11px;box-shadow:0 4px 0 #3B97BC;}
