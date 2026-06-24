@@ -343,12 +343,22 @@ let sticks=[]; // {a,b,len,stiff}
 let groups=[]; // visual quads for boxes
 let wheelsList=[];
 let boosters=[];
-let springs=[];
 const GRAV=0.55;
+// Booster = LIFT ROCKET. Each frame it pushes its own nodes straight up. While
+// fuelled this push beats gravity so the rig climbs/hovers; when the shared
+// battery fades the thrust dies and gravity brings the rig back down. Tune
+// BOOST_LIFT for how strongly it flies (must stay > GRAV to leave the ground).
+const BOOST_LIFT=0.9;
+// Spring = SOFT SUSPENSION. Its vertical edges + diagonals are springy (low
+// stick stiffness) so the part squishes under load and rebounds, cushioning
+// bumps. Lower = squishier/bouncier.
+const SPRING_STIFF=0.18;
 // Motor battery: runs at full for (MOTOR_RUN-MOTOR_FADE) frames, then eases down
 // to zero across MOTOR_FADE frames so the rig coasts to a smooth stop. ~60fps.
+// Boosters draw from this same battery, so flight and drive fade together.
 const MOTOR_RUN=720, MOTOR_FADE=240;   // ~12s total, last ~4s is a gentle wind-down
 let motorLife=0;
+let boostPower=0;          // current 0..1 thrust level, mirrored for the render
 
 function startPlay(){
   if(placed.length===0){ flash("Build something first! 🧱"); return; }
@@ -359,7 +369,7 @@ function startPlay(){
 }
 function stop(){
   mode='build'; goBtn.classList.remove('playing'); goBtn.innerHTML='▶ GO!';
-  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];springs=[];
+  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];
   tray.classList.remove('hidden');       // bring the parts back to keep building
 }
 goBtn.addEventListener('click',(e)=>{ e.stopPropagation(); mode==='build'?startPlay():stop(); });
@@ -368,7 +378,7 @@ function addPoint(x,y,o={}){ const p={x,y,px:x,py:y,pinned:false,r:6,mass:1,...o
 function addStick(a,b,stiff=1){ sticks.push({a,b,len:Math.hypot(a.x-b.x,a.y-b.y),stiff}); }
 
 function buildPhysics(){
-  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];springs=[];
+  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];
   // node grid shared between adjacent boxes so the rig is one connected structure
   const nodeMap={};
   function node(gx,gy,extra){ const k=gx+','+gy; if(nodeMap[k])return nodeMap[k];
@@ -407,16 +417,23 @@ function buildPhysics(){
       addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
       groups.push({nodes:[a,b,c,d],color:p.color,type:it.type,tilted:true});
     } else {
-      // box: 4 corner nodes
+      // box: 4 corner nodes (a=top-left, b=top-right, c=bottom-right, d=bottom-left)
       const a=node(it.gx,it.gy,{mass:p.mass/4});
       const b=node(it.gx+p.w,it.gy,{mass:p.mass/4});
       const c=node(it.gx+p.w,it.gy+p.h,{mass:p.mass/4});
       const d=node(it.gx,it.gy+p.h,{mass:p.mass/4});
-      addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
+      if(it.type==='spring'){
+        // soft suspension: firm top & bottom plates, but springy sides and
+        // diagonals so the part compresses under load and springs back
+        addStick(a,b,1); addStick(c,d,1);
+        addStick(b,c,SPRING_STIFF); addStick(d,a,SPRING_STIFF);
+        addStick(a,c,SPRING_STIFF); addStick(b,d,SPRING_STIFF);
+      } else {
+        addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
+      }
       groups.push({nodes:[a,b,c,d],color:p.color,type:it.type});
       if(it.type==='weight'){ [a,b,c,d].forEach(n=>n.mass*=3); }
       if(it.type==='booster'){ boosters.push({nodes:[a,b,c,d]}); }
-      if(it.type==='spring'){ springs.push({a:d,b:a,rest:GRID,phase:Math.random()*6}); }
     }
   }
   // Second pass: now that every chassis node exists, attach each wheel's axle
@@ -475,6 +492,7 @@ function physicsStep(){
   let powerLevel;
   if(motorLife > MOTOR_FADE){ powerLevel = 1; }
   else { const t = motorLife / MOTOR_FADE; powerLevel = t*t*(3-2*t); } // smoothstep
+  boostPower = powerLevel;                               // share the battery with boosters
   for(const w of wheelsList){
     const base = w.big ? 5.5 : 4.0;
     const target = w.powered ? base * powerLevel : 0;
@@ -493,14 +511,15 @@ function physicsStep(){
       w.angle += vx / Math.max(w.rad,1);
     }
   }
-  // boosters: upward thrust with a little wobble
-  for(const b of boosters){
-    for(const n of b.nodes){ n.y-=0.42; n.x+=Math.sin(animTime*0.2)*0.05; }
-  }
-  // springs: pulsing bounce
-  for(const s of springs){
-    const pulse=Math.sin(animTime*0.15+s.phase);
-    if(pulse>0.6){ s.a.y-=0.6; s.b.y-=0.6; }
+  // boosters: a lift rocket — steady upward thrust (with a little wobble) while
+  // fuelled. The push beats gravity so the rig climbs; as the shared battery
+  // fades (boostPower→0) gravity wins again and the rig settles back down.
+  // Springs need no per-frame work: their soft sticks cushion bumps on their own.
+  const lift = BOOST_LIFT * boostPower;
+  if(lift>0){
+    for(const b of boosters){
+      for(const n of b.nodes){ n.y-=lift; n.x+=Math.sin(animTime*0.2)*0.05; }
+    }
   }
   // constraints (several iterations for stiffness)
   for(let k=0;k<6;k++){
@@ -818,10 +837,12 @@ function drawPlay(){
     ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
     const cx=(a.x+c.x)/2, cy=(a.y+c.y)/2, sz=Math.hypot(b.x-a.x,b.y-a.y);
     if(g.type==='block'||g.type==='beam'||g.type==='motor') drawFace(cx,cy,sz*0.9);
-    if(g.type==='booster'){
-      // flame
+    if(g.type==='booster' && boostPower>0.02){
+      // flame — length tracks remaining fuel, so it shrinks and dies as the
+      // booster runs out of thrust
+      const len=(14+Math.random()*8)*boostPower;
       ctx.fillStyle='#FF8A5B';
-      ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(c.x,c.y);ctx.lineTo((c.x+d.x)/2,(c.y+d.y)/2+18+Math.random()*8);ctx.closePath();ctx.fill();
+      ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(c.x,c.y);ctx.lineTo((c.x+d.x)/2,(c.y+d.y)/2+len);ctx.closePath();ctx.fill();
     }
   }
   // wheels
@@ -925,7 +946,7 @@ resize();
 loop();
 
 /* friendly first-time tips cycle */
-const tips=["Tap a part, then tap the grid to place it!","Tip: put the Motor next to a Wheel to drive it!","Tip: hold a part down to delete it 🗑️","Tip: use ↶ undo and ↷ redo to fix mistakes.","Tip: add a Weight down low to stay balanced."];
+const tips=["Tap a part, then tap the grid to place it!","Tip: put the Motor next to a Wheel to drive it!","Tip: add Boosters to blast off and fly! 🚀","Tip: a Spring cushions bumps and hard landings.","Tip: hold a part down to delete it 🗑️","Tip: use ↶ undo and ↷ redo to fix mistakes.","Tip: add a Weight down low to stay balanced."];
 let ti=0;
 setInterval(()=>{ if(mode==='build'&&placed.length===0){ hint.textContent=tips[ti%tips.length]; hint.style.opacity='1'; ti++; } },3500);
 </script>
