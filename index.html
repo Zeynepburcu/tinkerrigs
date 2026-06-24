@@ -367,6 +367,9 @@ const SPRING_BRACE=0.25;
 const MOTOR_RUN=720, MOTOR_FADE=240;   // ~12s total, last ~4s is a gentle wind-down
 // 0..1 charge curve: full, then a smoothstep wind-down over the last FADE frames.
 function lifePower(life){ if(life>MOTOR_FADE) return 1; const t=life/MOTOR_FADE; return t*t*(3-2*t); }
+// All motors share ONE combined battery (their charges pooled) that drives every
+// wheel, so the whole rig revs up and stops together. More motors = bigger battery.
+let motorLife=0, motorFull=0, motorPower=0;
 
 function startPlay(){
   if(placed.length===0){ flash("Build something first! 🧱"); return; }
@@ -408,7 +411,7 @@ function buildPhysics(){
       // as a number (not emergent from a verlet rim) so the motor can drive it
       // reliably, and traction converts that spin into forward push on contact.
       const hub=addPoint(cx,cy,{r:rad,mass:p.mass,role:'hub',isWheel:true});
-      const w={hub,rad,color:p.color,motor:null,angle:0,spin:0,big:p.r>=1,it,p};
+      const w={hub,rad,color:p.color,angle:0,spin:0,big:p.r>=1,it,p};
       hub.wheel=w;
       wheelsList.push(w);
     } else if(it.type==='beam' && beamTilt.has(it)){
@@ -446,7 +449,7 @@ function buildPhysics(){
       groups.push(g);
       if(it.type==='weight'){ [a,b,c,d].forEach(n=>n.mass*=3); weightGroups.push([a,b,c,d]); }
       if(it.type==='booster'){ const bo={nodes:[a,b,c,d],life:MOTOR_RUN,power:1}; boosters.push(bo); g.booster=bo; }
-      if(it.type==='motor'){ const mo={nodes:[a,b,c,d],life:MOTOR_RUN,power:1,wheel:null}; motors.push(mo); g.motor=mo; }
+      if(it.type==='motor'){ motors.push({nodes:[a,b,c,d]}); g.motor=true; }
     }
   }
   // Second pass: now that every chassis node exists, attach each wheel's axle
@@ -458,16 +461,12 @@ function buildPhysics(){
   // the whole contact surface makes them sit flush.
   for(const b of boosters){ braceToStructure(b.nodes, nodeMap); }
   for(const wn of weightGroups){ braceToStructure(wn, nodeMap); }
-  // Each motor keeps its OWN battery and drives the nearest wheel while charged.
-  for(const m of motors){
-    const cx=(m.nodes[0].x+m.nodes[2].x)/2, cy=(m.nodes[0].y+m.nodes[2].y)/2;
-    let best=null,bd=1e9;
-    for(const w of wheelsList){ const d=Math.hypot(w.hub.x-cx,w.hub.y-cy); if(d<bd){bd=d;best=w;} }
-    m.wheel=best;
-    if(best && !best.motor) best.motor=m;   // wheel remembers its driver (first wins)
-  }
-  // wheels with no motor still roll freely
+  // Pool every motor's charge into one shared battery. Any motor drives ALL
+  // wheels off this battery, so they spin up and stop together. No motor: wheels
+  // just roll freely.
   hasMotor = motors.length>0;
+  motorFull = motors.length * MOTOR_RUN;   // more motors = a bigger combined battery
+  motorLife = motorFull;
 }
 let hasMotor=false;
 
@@ -521,22 +520,23 @@ function physicsStep(){
   // POWERED PARTS — each motor and each booster drains its OWN battery, easing
   // from full to zero (smoothstep) so the rig coasts/settles instead of stopping
   // dead.
-  for(const m of motors){ m.life=Math.max(0,m.life-1); m.power=lifePower(m.life); }
+  // combined motor battery drains as one; every wheel reads the same power.
+  motorLife = Math.max(0, motorLife-1);
+  motorPower = hasMotor ? lifePower(motorLife) : 0;
   for(const b of boosters){ b.life=Math.max(0,b.life-1); b.power=lifePower(b.life); }
 
-  // WHEELS — a wheel driven by a motor spins under that motor's power; the rest
-  // roll freely. Traction is a soft contact factor (not on/off) so a brief hop or
-  // bump doesn't kill the drive.
+  // WHEELS — every wheel is driven off the shared motor battery (so they spin up
+  // and wind down together); with no motor they all just roll freely. Traction is
+  // a soft contact factor (not on/off) so a brief hop or bump doesn't kill the drive.
   for(const w of wheelsList){
-    const power = w.motor ? w.motor.power : 0;
     const base = w.big ? 5.5 : 4.0;
-    w.spin += (base*power - w.spin) * 0.06;             // ease toward target (rev up / wind down)
+    w.spin += (base*motorPower - w.spin) * 0.06;        // ease toward target (rev up / wind down)
 
     // soft ground contact against the terrain surface (flat ground or ramp)
     const surf = terrainY(w.hub.x);
     const gap = (surf - w.rad) - w.hub.y;               // >0 means airborne
     const contact = gap <= 0 ? 1 : Math.max(0, 1 - gap/18);
-    if(w.motor && Math.abs(w.spin) > 0.01){
+    if(hasMotor && Math.abs(w.spin) > 0.01){
       const drive = w.spin * w.rad * 0.045 * contact;    // scale push by contact
       w.hub.x += drive;
       w.angle += w.spin * 0.06;
@@ -876,10 +876,10 @@ function drawPlay(){
       ctx.fillStyle='#FF8A5B';
       ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(c.x,c.y);ctx.lineTo((c.x+d.x)/2,(c.y+d.y)/2+len);ctx.closePath();ctx.fill();
     }
-    if(g.type==='motor' && g.motor){
-      // battery gauge lives on the MOTOR itself (the part that holds the charge):
-      // a ring that empties as it runs down, turning orange when low.
-      const frac=Math.max(0,g.motor.life/MOTOR_RUN);
+    if(g.type==='motor'){
+      // battery gauge lives on the MOTOR itself. Every motor shows the same shared
+      // charge, so all gauges empty in sync: a ring that turns orange when low.
+      const frac=motorFull>0 ? Math.max(0,motorLife/motorFull) : 0;
       if(frac>0){
         ctx.strokeStyle=frac>0.33?'#3FC1B7':'#FF8A5B';
         ctx.lineWidth=4;ctx.lineCap='round';
@@ -903,9 +903,9 @@ function drawPlay(){
       ctx.stroke();
     }
     ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad*0.22,0,7);ctx.fill();
-    // a driven wheel gets a small teal hub dot so you can see which one the motor
-    // turns; the battery gauge itself lives on the motor.
-    if(w.motor){
+    // when a motor is present every wheel is driven, so each gets a teal hub dot;
+    // the battery gauge itself lives on the motor.
+    if(hasMotor){
       ctx.fillStyle='#3FC1B7';ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad*0.12,0,7);ctx.fill();
     }
   }
@@ -957,7 +957,7 @@ function loop(){
 
     const dist=rx-startCx;
     if(dist>W*0.9 && !celebrated){ celebrated=true; flashBig("🎉 Amazing rig!","Look at it go!"); }
-    if(hasMotor && motors.every(m=>m.life===0) && !motorDone){ motorDone=true; flash("Motor wound down — press STOP to build again 🔋"); }
+    if(hasMotor && motorLife===0 && !motorDone){ motorDone=true; flash("Motor wound down — press STOP to build again 🔋"); }
   } else {
     startCx=null; camX=0; rigSpeedSmooth=0; motorDone=false; zoom=1;
     drawBackground(0, 0, 1);
