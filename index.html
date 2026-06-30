@@ -75,12 +75,22 @@ let groundY=0;
    ============================================================ */
 let level={ features:[] };
 
-function buildLevel(){
-  // One fixed ramp partway along. groundY must be known (after resize()).
-  // Placed well to the right of the start so the rig builds up speed first.
-  level={ features:[
-    { type:'ramp', x: 900, run: 175, top: 90, rise: 95 },
-  ]};
+// Build a fresh, randomized course of ramps. Called ONCE per page load (not on
+// resize) so the level varies each time the game is opened but stays put while
+// you play. Features are world coords and don't depend on groundY.
+function generateLevel(){
+  const feats=[];
+  const rnd=(lo,hi)=>lo+Math.random()*(hi-lo);
+  const count = 3 + Math.floor(Math.random()*4);   // 3..6 ramps
+  let x = rnd(650, 950);                            // first ramp: a runway to build speed
+  for(let i=0;i<count;i++){
+    const run  = Math.round(rnd(130, 220));         // up/down slope length
+    const top  = Math.round(rnd(50, 130));          // flat crest length
+    const rise = Math.round(rnd(55, 170));          // height — the part that varies most
+    feats.push({ type:'ramp', x:Math.round(x), run, top, rise });
+    x += run*2 + top + rnd(280, 560);               // clear gap before the next ramp
+  }
+  level={ features:feats };
 }
 
 // Surface Y at a given world X. Lower number = higher up on screen.
@@ -135,7 +145,13 @@ const PARTS = {
   bigwheel:{name:'Big Wheel',color:'#7B5EA7',kind:'wheel',w:2,h:2, mass:1.2, r:1},
   block:  {name:'Block',  color:'#FFC93C', kind:'box',   w:1,h:1, mass:1},
   beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:3,h:1, mass:1.4},
-  motor:  {name:'Motor',  color:'#3FC1B7', kind:'motor', w:1,h:1, mass:1.2},
+  // Three motor sizes. `run` = how many frames of charge each adds to the shared
+  // battery (~60fps), so bigger motors drive the rig noticeably farther.
+  // `core` (0..1) = how big/bright the power core looks — bigger means more
+  // power and more weight (mass tracks it).
+  motormini:{name:'Mini Motor',color:'#9AE0D8',kind:'motor',w:1,h:1,mass:1.0, run:360,  core:0.35},
+  motor:    {name:'Motor',     color:'#3FC1B7',kind:'motor',w:1,h:1,mass:1.2, run:720,  core:0.6},
+  motormega:{name:'Mega Motor',color:'#1F7A72',kind:'motor',w:1,h:1,mass:1.6, run:1320, core:0.95},
   booster:{name:'Booster',color:'#5EC2E8', kind:'booster',w:1,h:1, mass:.6},
   weight: {name:'Weight', color:'#6B5B73', kind:'weight',w:1,h:1, mass:3},
   spring: {name:'Spring', color:'#FF6B9D', kind:'spring', w:1,h:1, mass:.7},
@@ -152,7 +168,11 @@ function icon(type){
     case 'beam':  body=`<rect x="4" y="14" width="40" height="20" rx="9" fill="${c}"/><rect x="4" y="14" width="40" height="9" rx="9" fill="#fff" opacity=".25"/><circle cx="15" cy="24" r="2.6" fill="#fff"/><circle cx="33" cy="24" r="2.6" fill="#fff"/><circle cx="15.5" cy="24.4" r="1.3" fill="#3A2E45"/><circle cx="33.5" cy="24.4" r="1.3" fill="#3A2E45"/>`;break;
     case 'wheel': body=`<circle cx="24" cy="24" r="18" fill="#3A2E45"/><circle cx="24" cy="24" r="14" fill="${c}"/><circle cx="24" cy="24" r="5" fill="#fff"/>`;break;
     case 'bigwheel': body=`<circle cx="24" cy="24" r="20" fill="#3A2E45"/><circle cx="24" cy="24" r="15" fill="${c}"/><circle cx="24" cy="24" r="6" fill="#fff"/><circle cx="24" cy="11" r="2" fill="#fff"/><circle cx="24" cy="37" r="2" fill="#fff"/><circle cx="11" cy="24" r="2" fill="#fff"/><circle cx="37" cy="24" r="2" fill="#fff"/>`;break;
-    case 'motor': body=`<rect x="8" y="8" width="32" height="32" rx="9" fill="${c}"/><path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="${c}" stroke-width="5" stroke-linecap="round"/><circle cx="24" cy="24" r="9" fill="#fff" opacity=".9"/>${face}`;break;
+    case 'motormini':
+    case 'motormega':
+    case 'motor': { const cr=5+8*PARTS[type].core;   // core radius scales with power
+      body=`<rect x="8" y="8" width="32" height="32" rx="9" fill="${c}"/><path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="${c}" stroke-width="5" stroke-linecap="round"/><circle cx="24" cy="24" r="${(cr*1.25).toFixed(1)}" fill="#FF8A5B" opacity=".4"/><circle cx="24" cy="24" r="${cr.toFixed(1)}" fill="#FF8A5B"/><circle cx="24" cy="24" r="${(cr*0.5).toFixed(1)}" fill="#FFD84D"/>${face}`;
+    } break;
     case 'booster': body=`<path d="M24 6 C34 14 36 26 24 42 C12 26 14 14 24 6Z" fill="${c}"/><circle cx="24" cy="20" r="8" fill="#fff" opacity=".4"/>${eye}<path d="M20 40 Q24 46 28 40" stroke="${c}" stroke-width="4" fill="none" stroke-linecap="round"/>`;break;
     case 'weight': body=`<path d="M14 16 L34 16 L38 40 L10 40 Z" fill="${c}"/><rect x="18" y="9" width="12" height="9" rx="4" fill="#3A2E45"/><text x="24" y="34" font-size="13" font-weight="800" fill="#fff" text-anchor="middle" font-family="sans-serif">kg</text>`;break;
     case 'spring': body=`<path d="M14 40 L34 36 L14 30 L34 26 L14 20 L34 16 L14 10" stroke="${c}" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="34" cy="10" r="6" fill="${c}"/>`;break;
@@ -179,7 +199,6 @@ function resize(){
   W=wrap.clientWidth; H=wrap.clientHeight; DPR=Math.min(window.devicePixelRatio||1,2);
   cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
   groundY = H - GRID*1.5;
-  buildLevel();
 }
 window.addEventListener('resize',resize);
 
@@ -426,7 +445,7 @@ function buildPhysics(){
       const c=addPoint(t.bx + px*hw, t.by + py*hw, {mass:p.mass/4});
       const d=addPoint(t.ax + px*hw, t.ay + py*hw, {mass:p.mass/4});
       addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
-      groups.push({nodes:[a,b,c,d],color:p.color,type:it.type,tilted:true});
+      groups.push({nodes:[a,b,c,d],color:p.color,type:it.type,kind:p.kind,tilted:true});
     } else {
       // box: 4 corner nodes (a=top-left, b=top-right, c=bottom-right, d=bottom-left)
       const a=node(it.gx,it.gy,{mass:p.mass/4});
@@ -445,11 +464,11 @@ function buildPhysics(){
       } else {
         addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
       }
-      const g={nodes:[a,b,c,d],color:p.color,type:it.type};
+      const g={nodes:[a,b,c,d],color:p.color,type:it.type,kind:p.kind};
       groups.push(g);
       if(it.type==='weight'){ [a,b,c,d].forEach(n=>n.mass*=3); weightGroups.push([a,b,c,d]); }
       if(it.type==='booster'){ const bo={nodes:[a,b,c,d],life:MOTOR_RUN,power:1}; boosters.push(bo); g.booster=bo; }
-      if(it.type==='motor'){ motors.push({nodes:[a,b,c,d]}); g.motor=true; }
+      if(p.kind==='motor'){ motors.push({nodes:[a,b,c,d], run:p.run}); g.motor=true; }
     }
   }
   // Second pass: now that every chassis node exists, attach each wheel's axle
@@ -465,7 +484,7 @@ function buildPhysics(){
   // wheels off this battery, so they spin up and stop together. No motor: wheels
   // just roll freely.
   hasMotor = motors.length>0;
-  motorFull = motors.length * MOTOR_RUN;   // more motors = a bigger combined battery
+  motorFull = motors.reduce((s,m)=>s+m.run, 0);   // each motor adds its own run to the pool
   motorLife = motorFull;
 }
 let hasMotor=false;
@@ -761,6 +780,18 @@ function drawFace(cx,cy,sz){
   ctx.beginPath();ctx.arc(cx,cy+sz*.1,sz*.16,0.15*Math.PI,0.85*Math.PI);ctx.stroke();
 }
 
+// The motor's glowing power core. A bigger, brighter core means more power (and
+// weight). coreFrac is set per motor type; pulse animates it gently during play.
+function drawMotorCore(cx,cy,sz,coreFrac,pulse){
+  const r = sz*(0.13 + 0.25*coreFrac) * (pulse||1);
+  ctx.fillStyle='rgba(255,138,91,.35)';
+  ctx.beginPath();ctx.arc(cx,cy,r*1.25,0,7);ctx.fill();
+  ctx.fillStyle='#FF8A5B';
+  ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.fill();
+  ctx.fillStyle='#FFD84D';
+  ctx.beginPath();ctx.arc(cx,cy,r*0.5,0,7);ctx.fill();
+}
+
 function drawBuild(){
   for(const it of placed){
     const p=PARTS[it.type];
@@ -847,7 +878,12 @@ function drawPartShape(type,x,y,w,h,color){
   ctx.fillStyle=color;roundRectPath(x,y,w,h,14);ctx.fill();
   // top gloss
   ctx.fillStyle='rgba(255,255,255,.28)';roundRectPath(x,y,w,h*0.42,14);ctx.fill();
-  if(type==='block'||type==='beam'||type==='motor') drawFace(x+w/2,y+h/2,Math.min(w,h));
+  const kind=PARTS[type].kind;
+  if(kind==='motor'){
+    const sz=Math.min(w,h);
+    drawMotorCore(x+w/2,y+h/2,sz,PARTS[type].core,1);
+    drawFace(x+w/2,y+h/2,sz*0.78);
+  } else if(kind==='box') drawFace(x+w/2,y+h/2,Math.min(w,h));
   if(type==='weight'){ ctx.fillStyle='#fff';ctx.font='bold '+(h*0.3)+'px sans-serif';ctx.textAlign='center';ctx.fillText('kg',x+w/2,y+h*0.7); }
   if(type==='booster'){ ctx.fillStyle='rgba(255,255,255,.5)';ctx.beginPath();ctx.arc(x+w/2,y+h*0.35,w*0.18,0,7);ctx.fill(); }
   if(type==='spring'){ ctx.strokeStyle='#fff';ctx.lineWidth=4;ctx.lineCap='round';ctx.beginPath();
@@ -868,7 +904,11 @@ function drawPlay(){
     ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=5;ctx.lineCap='round';
     ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
     const cx=(a.x+c.x)/2, cy=(a.y+c.y)/2, sz=Math.hypot(b.x-a.x,b.y-a.y);
-    if(g.type==='block'||g.type==='beam'||g.type==='motor') drawFace(cx,cy,sz*0.9);
+    if(g.kind==='motor'){
+      const pulse=1+0.08*Math.sin(animTime*0.15);
+      drawMotorCore(cx,cy,sz,PARTS[g.type].core,pulse);
+      drawFace(cx,cy,sz*0.72);
+    } else if(g.kind==='box') drawFace(cx,cy,sz*0.9);
     if(g.type==='booster' && g.booster && g.booster.power>0.02){
       // flame — length tracks remaining fuel, so it shrinks and dies as the
       // booster runs out of thrust
@@ -876,7 +916,7 @@ function drawPlay(){
       ctx.fillStyle='#FF8A5B';
       ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(c.x,c.y);ctx.lineTo((c.x+d.x)/2,(c.y+d.y)/2+len);ctx.closePath();ctx.fill();
     }
-    if(g.type==='motor'){
+    if(g.kind==='motor'){
       // battery gauge lives on the MOTOR itself. Every motor shows the same shared
       // charge, so all gauges empty in sync: a ring that turns orange when low.
       const frac=motorFull>0 ? Math.max(0,motorLife/motorFull) : 0;
@@ -979,11 +1019,12 @@ function flashBig(msg,sub){
   bigT=setTimeout(()=>toast.classList.remove('show'),2200);
 }
 updateHistoryButtons();
+generateLevel();     // one randomized course per page load
 resize();
 loop();
 
 /* friendly first-time tips cycle */
-const tips=["Tap a part, then tap the grid to place it!","Tip: put the Motor next to a Wheel to drive it!","Tip: add Boosters to blast off and fly! 🚀","Tip: a Spring cushions bumps and hard landings.","Tip: hold a part down to delete it 🗑️","Tip: use ↶ undo and ↷ redo to fix mistakes.","Tip: add a Weight down low to stay balanced."];
+const tips=["Tap a part, then tap the grid to place it!","Tip: put a Motor next to a Wheel to drive it!","Tip: a Mega Motor drives farther; a Mini runs out fast.","Tip: add Boosters to blast off and fly! 🚀","Tip: a Spring cushions bumps and hard landings.","Tip: hold a part down to delete it 🗑️","Tip: use ↶ undo and ↷ redo to fix mistakes.","Tip: add a Weight down low to stay balanced."];
 let ti=0;
 setInterval(()=>{ if(mode==='build'&&placed.length===0){ hint.textContent=tips[ti%tips.length]; hint.style.opacity='1'; ti++; } },3500);
 </script>
