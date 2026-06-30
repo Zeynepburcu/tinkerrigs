@@ -103,20 +103,25 @@ function generateLevel(){
   levelRng = makeRng((Math.random()*2**32)|0);
   level = { features:[] };
   nextRampX = 650 + levelRng()*350;   // runway before the first ramp
-  extendLevel(2200);                  // seed a few ramps so the start is populated
+  extendLevel(Math.max(W,600)*2);     // seed the first couple of ramps ahead
 }
 
 // Append ramps until the course covers world x `toX`. Idempotent-ish: only ever
 // adds ahead of nextRampX, so terrainY/drawTerrain stay consistent frame to frame.
 function extendLevel(toX){
   const rnd=(lo,hi)=>lo+levelRng()*(hi-lo);
+  const screen = Math.max(W, 600);                     // fall back if W not measured yet
   while(nextRampX < toX){
-    const run  = Math.round(rnd(140, 260));            // slope length (longer = gentler)
+    const run  = Math.round(rnd(150, 260));            // slope length (longer = gentler)
     const top  = Math.round(rnd(50, 140));             // flat crest length
     // tie height to slope length so ramps stay climbable (no near-vertical walls)
-    const rise = Math.round(run * rnd(0.32, 0.72));
+    const rise = Math.round(run * rnd(0.32, 0.7));
     level.features.push({ type:'ramp', x:Math.round(nextRampX), run, top, rise });
-    nextRampX += run*2 + top + rnd(420, 900);          // flat gap before the next one
+    // Space ramps more than a screen apart (start-to-start) so at most two ever
+    // share the view — even zoomed out, accounting for each ramp's own width — with
+    // a long flat stretch between them.
+    const footprint = run*2 + top;
+    nextRampX += Math.max(screen*rnd(1.15,1.9), footprint+360);
   }
 }
 
@@ -415,7 +420,7 @@ const MOTOR_RUN=720, MOTOR_FADE=240;   // ~12s total, last ~4s is a gentle wind-
 function lifePower(life){ if(life>MOTOR_FADE) return 1; const t=life/MOTOR_FADE; return t*t*(3-2*t); }
 // All motors share ONE combined battery (their charges pooled) that drives every
 // wheel, so the whole rig revs up and stops together. More motors = bigger battery.
-let motorLife=0, motorFull=0, motorPower=0;
+let motorLife=0, motorFull=0, motorPower=0, motorStrength=0;
 
 function startPlay(){
   if(placed.length===0){ flash("Build something first! 🧱"); return; }
@@ -497,7 +502,7 @@ function buildPhysics(){
       groups.push(g);
       if(it.type==='weight'){ [a,b,c,d].forEach(n=>n.mass*=3); weightGroups.push([a,b,c,d]); }
       if(it.type==='booster'){ const bo={nodes:[a,b,c,d],life:MOTOR_RUN,power:1}; boosters.push(bo); g.booster=bo; }
-      if(p.kind==='motor'){ motors.push({nodes:[a,b,c,d], run:p.run}); g.motor=true; }
+      if(p.kind==='motor'){ motors.push({nodes:[a,b,c,d], run:p.run, core:p.core}); g.motor=true; }
     }
   }
   // Second pass: now that every chassis node exists, attach each wheel's axle
@@ -515,6 +520,9 @@ function buildPhysics(){
   hasMotor = motors.length>0;
   motorFull = motors.reduce((s,m)=>s+m.run, 0);   // each motor adds its own run to the pool
   motorLife = motorFull;
+  // Drive torque scales with the motors' cores: a Mini pushes noticeably less than
+  // a Motor/Mega. Each motor contributes 0.55 + 0.45*core; combined caps at 1.
+  motorStrength = Math.min(1, motors.reduce((s,m)=>s + (0.55 + 0.45*m.core), 0));
 }
 let hasMotor=false;
 
@@ -578,7 +586,7 @@ function physicsStep(){
   // a soft contact factor (not on/off) so a brief hop or bump doesn't kill the drive.
   for(const w of wheelsList){
     const base = w.big ? 5.5 : 4.0;
-    w.spin += (base*motorPower - w.spin) * 0.06;        // ease toward target (rev up / wind down)
+    w.spin += (base*motorPower*motorStrength - w.spin) * 0.06;   // ease toward target (rev up / wind down)
 
     // soft ground contact against the terrain surface (flat ground or ramp)
     const surf = terrainY(w.hub.x);
@@ -771,8 +779,9 @@ function drawTerrain(camX){
   for(const f of level.features){
     if(f.type!=='ramp') continue;
     const upEnd=f.x+f.run, topEnd=upEnd+f.top, downEnd=topEnd+f.run;
-    // cull if entirely off-screen
-    if(downEnd < camX-40 || f.x > camX+W+40) continue;
+    // cull only well outside the view (generous right margin covers the zoomed-out
+    // view AND lets ramps render before they scroll in, instead of popping at the edge)
+    if(downEnd < camX-W*0.5 || f.x > camX+W*2) continue;
     const yTop=groundY - f.rise;
     ctx.fillStyle=g;
     ctx.beginPath();
@@ -998,7 +1007,7 @@ function loop(){
     // camera target so the rig sits at ANCHOR of the viewport; never scroll left of 0
     const targetCam=Math.max(0, rx - W*ANCHOR);
     camX += (targetCam-camX)*0.12;           // smooth follow
-    extendLevel(camX + W/zoom + 600);        // keep ramps appearing ahead of the rig
+    extendLevel(camX + W*2);                  // generate ramps ~2 screens ahead so they exist before scrolling in
 
     // measure speed (world px/frame) for streaks + bg intensity
     const inst=Math.abs(rx-lastRigX); lastRigX=rx;
@@ -1030,7 +1039,7 @@ function loop(){
     if(hasMotor && motorLife===0 && !motorDone){ motorDone=true; flash("Motor wound down — press STOP to build again 🔋"); }
   } else {
     startCx=null; camX=0; rigSpeedSmooth=0; motorDone=false; zoom=1;
-    extendLevel(W + 400);   // make sure any ramps within the build view exist
+    extendLevel(W*2);   // make sure ramps in/near the build view exist
     drawBackground(0, 0, 1);
     drawTerrain(0);     // show ramps in build mode too, so kids know they're there
     drawBuild();
@@ -1050,8 +1059,8 @@ function flashBig(msg,sub){
   bigT=setTimeout(()=>toast.classList.remove('show'),2200);
 }
 updateHistoryButtons();
+resize();            // measure the canvas first so level spacing knows the screen width
 generateLevel();     // one randomized course per page load
-resize();
 loop();
 
 /* friendly first-time tips cycle */
