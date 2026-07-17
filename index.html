@@ -1,0 +1,1041 @@
+<<<<<<< HEAD
+=======
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Tinker Rigs — Build Things That Move</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo"><span class="bolt"><span>🔧</span></span>Tinker Rigs</div>
+    <div class="tagline">snap parts together &amp; watch them move</div>
+    <div class="spacer"></div>
+    <div class="toolbar">
+      <button class="btn icon" id="undoBtn" title="Undo" aria-label="Undo">↶</button>
+      <button class="btn icon" id="redoBtn" title="Redo" aria-label="Redo">↷</button>
+      <button class="btn mini" id="clearBtn">🧹 Clear</button>
+    </div>
+  </header>
+  <main>
+    <div class="tray" id="tray"><h2>Parts</h2></div>
+    <div class="stage-wrap">
+      <canvas id="cv"></canvas>
+      <div class="hint" id="hint">Tap a part on the left, then tap the grid to place it</div>
+      <div class="controls">
+        <button class="btn go" id="goBtn">▶ GO!</button>
+      </div>
+      <div class="toast" id="toast"></div>
+      <div class="credits">
+        <h3>Credits</h3>
+        <p>Designer: <a href="https://www.linkedin.com/in/zeynepburcukaya/" target="_blank" rel="noopener noreferrer">Zeynep Burcu Kaya Alpan</a></p>
+        <p>Tester: Ahmetcan Alpan</p>
+        <p>Vibecoded for: Can D. Alpan</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+/* surface any runtime error on screen instead of silently freezing the loop */
+window.addEventListener('error',function(ev){
+  let box=document.getElementById('errBox');
+  if(!box){ box=document.createElement('div'); box.id='errBox';
+    box.style.cssText='position:fixed;left:8px;bottom:8px;z-index:9999;max-width:90vw;background:#E86E3F;color:#fff;font:12px/1.4 monospace;padding:8px 12px;border-radius:10px;white-space:pre-wrap;box-shadow:0 4px 16px rgba(0,0,0,.3)';
+    document.body.appendChild(box); }
+  box.textContent='⚠ '+(ev.message||ev.error)+'  @'+(ev.lineno||'?');
+});
+</script>
+<script>
+/* ============================================================
+   TINKER RIGS — a tiny physics building toy for kids
+   Build mode: snap parts to a grid. Play mode: verlet physics.
+   ============================================================ */
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const tray = document.getElementById('tray');
+const goBtn = document.getElementById('goBtn');
+const clearBtn = document.getElementById('clearBtn');
+const undoBtn = document.getElementById('undoBtn');
+const redoBtn = document.getElementById('redoBtn');
+const hint = document.getElementById('hint');
+const toast = document.getElementById('toast');
+
+let W=0,H=0,DPR=1;
+const GRID=46;                 // grid cell size in CSS px
+let groundY=0;
+
+/* ============================================================
+   LEVEL / TERRAIN
+   The world floor is defined by terrainY(worldX) — the surface height at any
+   point. It's flat at `groundY` everywhere except where a feature raises it.
+   Features live in level.features so a future level editor can just push new
+   ones (ramps, hills, gaps) without touching the physics or render code.
+   Each ramp: {type:'ramp', x, rise, run, top} in WORLD coords.
+     x    = world x where the slope up begins
+     run  = horizontal length of the up-slope (and of the down-slope)
+     top  = flat length at the crest
+     rise = how high the crest sits above the ground
+   ============================================================ */
+let level={ features:[] };
+
+// Build a fresh, randomized course of ramps. Called ONCE per page load (not on
+// resize) so the level varies each time the game is opened but stays put while
+// you play. Features are world coords and don't depend on groundY.
+function generateLevel(){
+  const feats=[];
+  const rnd=(lo,hi)=>lo+Math.random()*(hi-lo);
+  const count = 3 + Math.floor(Math.random()*4);   // 3..6 ramps
+  let x = rnd(650, 950);                            // first ramp: a runway to build speed
+  for(let i=0;i<count;i++){
+    const run  = Math.round(rnd(130, 220));         // up/down slope length
+    const top  = Math.round(rnd(50, 130));          // flat crest length
+    const rise = Math.round(rnd(55, 170));          // height — the part that varies most
+    feats.push({ type:'ramp', x:Math.round(x), run, top, rise });
+    x += run*2 + top + rnd(280, 560);               // clear gap before the next ramp
+  }
+  level={ features:feats };
+}
+
+// Surface Y at a given world X. Lower number = higher up on screen.
+function terrainY(wx){
+  let y=groundY;
+  for(const f of level.features){
+    if(f.type==='ramp'){
+      const upEnd=f.x+f.run, topEnd=upEnd+f.top, downEnd=topEnd+f.run;
+      if(wx<=f.x || wx>=downEnd) continue;          // outside this ramp
+      if(wx<upEnd){                                  // going up
+        const t=(wx-f.x)/f.run; y=Math.min(y, groundY - f.rise*t);
+      } else if(wx<topEnd){                          // flat crest
+        y=Math.min(y, groundY - f.rise);
+      } else {                                       // coming down
+        const t=(wx-topEnd)/f.run; y=Math.min(y, groundY - f.rise*(1-t));
+      }
+    }
+  }
+  return y;
+}
+// surface slope (dy/dx) at world X — used so wheels sit flush on inclines
+function terrainSlope(wx){
+  const d=2; return (terrainY(wx+d)-terrainY(wx-d))/(2*d);
+}
+
+/* ---------- beam auto-tilt ----------
+   Returns tilt geometry for a beam if it bridges a BIG wheel and a SMALL wheel
+   (one of each), else null. Shared by the physics builder and the build-mode
+   preview so they always agree. Works in grid->world pixel coords. */
+function beamTiltFor(it){
+  if(it.type!=='beam') return null;
+  const p=PARTS[it.type];
+  const wheels=placed.filter(o=>PARTS[o.type].kind==='wheel').map(o=>{
+    const pp=PARTS[o.type];
+    return { big:pp.r>=1, cx:(o.gx+pp.w/2)*GRID, cy:(o.gy+pp.h/2)*GRID, rad:pp.r*GRID*0.9 };
+  });
+  const leftX=it.gx*GRID, rightX=(it.gx+p.w)*GRID, midY=(it.gy+p.h/2)*GRID;
+  const near=(ex)=>{ let best=null,bd=GRID*1.8; for(const wi of wheels){
+    const dd=Math.hypot(wi.cx-ex, wi.cy-midY); if(dd<bd){bd=dd;best=wi;} } return best; };
+  const L=near(leftX), R=near(rightX);
+  if(L && R && L!==R && L.big!==R.big){
+    const ax=L.cx, ay=L.cy-L.rad, bx=R.cx, by=R.cy-R.rad;
+    return { angle:Math.atan2(by-ay,bx-ax), ax, ay, bx, by };
+  }
+  return null;
+}
+
+/* ---------- PART DEFINITIONS ----------
+   Each part type has an icon (SVG) and physics behavior. */
+const PARTS = {
+  wheel:  {name:'Wheel',  color:'#5E4585', kind:'wheel', w:1,h:1, mass:.8, r:.5},
+  bigwheel:{name:'Big Wheel',color:'#7B5EA7',kind:'wheel',w:2,h:2, mass:1.2, r:1},
+  block:  {name:'Block',  color:'#FFC93C', kind:'box',   w:1,h:1, mass:1},
+  beam:   {name:'Beam',   color:'#FF8A5B', kind:'box',   w:3,h:1, mass:1.4},
+  // Three motor sizes. `run` = how many frames of charge each adds to the shared
+  // battery (~60fps), so bigger motors drive the rig noticeably farther.
+  // `core` (0..1) = how big/bright the power core looks — bigger means more
+  // power and more weight (mass tracks it).
+  motormini:{name:'Mini Motor',color:'#9AE0D8',kind:'motor',w:1,h:1,mass:1.0, run:360,  core:0.35},
+  motor:    {name:'Motor',     color:'#3FC1B7',kind:'motor',w:1,h:1,mass:1.2, run:720,  core:0.6},
+  motormega:{name:'Mega Motor',color:'#1F7A72',kind:'motor',w:1,h:1,mass:1.6, run:1320, core:0.95},
+  booster:{name:'Booster',color:'#5EC2E8', kind:'booster',w:1,h:1, mass:.6},
+  weight: {name:'Weight', color:'#6B5B73', kind:'weight',w:1,h:1, mass:3},
+  spring: {name:'Spring', color:'#FF6B9D', kind:'spring', w:1,h:1, mass:.7},
+};
+
+/* SVG icon factory — friendly, gender-neutral toy parts with little faces */
+function icon(type){
+  const c = PARTS[type].color;
+  const face='<circle cx="18" cy="20" r="3" fill="#3A2E45"/><circle cx="30" cy="20" r="3" fill="#3A2E45"/><path d="M18 28 Q24 33 30 28" stroke="#3A2E45" stroke-width="2.5" fill="none" stroke-linecap="round"/>';
+  const eye='<circle cx="19" cy="22" r="2.6" fill="#fff"/><circle cx="29" cy="22" r="2.6" fill="#fff"/><circle cx="19.6" cy="22.6" r="1.3" fill="#3A2E45"/><circle cx="29.6" cy="22.6" r="1.3" fill="#3A2E45"/>';
+  let body;
+  switch(type){
+    case 'block': body=`<rect x="8" y="8" width="32" height="32" rx="9" fill="${c}"/><rect x="8" y="8" width="32" height="14" rx="9" fill="#fff" opacity=".25"/>${face}`;break;
+    case 'beam':  body=`<rect x="4" y="14" width="40" height="20" rx="9" fill="${c}"/><rect x="4" y="14" width="40" height="9" rx="9" fill="#fff" opacity=".25"/><circle cx="15" cy="24" r="2.6" fill="#fff"/><circle cx="33" cy="24" r="2.6" fill="#fff"/><circle cx="15.5" cy="24.4" r="1.3" fill="#3A2E45"/><circle cx="33.5" cy="24.4" r="1.3" fill="#3A2E45"/>`;break;
+    case 'wheel': body=`<circle cx="24" cy="24" r="18" fill="#3A2E45"/><circle cx="24" cy="24" r="14" fill="${c}"/><circle cx="24" cy="24" r="5" fill="#fff"/>`;break;
+    case 'bigwheel': body=`<circle cx="24" cy="24" r="20" fill="#3A2E45"/><circle cx="24" cy="24" r="15" fill="${c}"/><circle cx="24" cy="24" r="6" fill="#fff"/><circle cx="24" cy="11" r="2" fill="#fff"/><circle cx="24" cy="37" r="2" fill="#fff"/><circle cx="11" cy="24" r="2" fill="#fff"/><circle cx="37" cy="24" r="2" fill="#fff"/>`;break;
+    case 'motormini':
+    case 'motormega':
+    case 'motor': { const cr=5+8*PARTS[type].core;   // core radius scales with power
+      body=`<rect x="8" y="8" width="32" height="32" rx="9" fill="${c}"/><path d="M24 4 L24 12 M24 36 L24 44 M4 24 L12 24 M36 24 L44 24" stroke="${c}" stroke-width="5" stroke-linecap="round"/><circle cx="24" cy="24" r="${(cr*1.25).toFixed(1)}" fill="#FF8A5B" opacity=".4"/><circle cx="24" cy="24" r="${cr.toFixed(1)}" fill="#FF8A5B"/><circle cx="24" cy="24" r="${(cr*0.5).toFixed(1)}" fill="#FFD84D"/>${face}`;
+    } break;
+    case 'booster': body=`<path d="M24 6 C34 14 36 26 24 42 C12 26 14 14 24 6Z" fill="${c}"/><circle cx="24" cy="20" r="8" fill="#fff" opacity=".4"/>${eye}<path d="M20 40 Q24 46 28 40" stroke="${c}" stroke-width="4" fill="none" stroke-linecap="round"/>`;break;
+    case 'weight': body=`<path d="M14 16 L34 16 L38 40 L10 40 Z" fill="${c}"/><rect x="18" y="9" width="12" height="9" rx="4" fill="#3A2E45"/><text x="24" y="34" font-size="13" font-weight="800" fill="#fff" text-anchor="middle" font-family="sans-serif">kg</text>`;break;
+    case 'spring': body=`<path d="M14 40 L34 36 L14 30 L34 26 L14 20 L34 16 L14 10" stroke="${c}" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="34" cy="10" r="6" fill="${c}"/>`;break;
+  }
+  return `<svg class="ic" width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
+}
+
+/* Build the parts tray */
+for(const type in PARTS){
+  const b=document.createElement('button');
+  b.className='part-btn';
+  b.dataset.type=type;
+  b.innerHTML = icon(type)+`<span class="nm">${PARTS[type].name}</span>`;
+  tray.appendChild(b);
+}
+
+/* ---------- THE BUILD ---------- */
+let placed=[];      // {type, gx, gy} grid coords (top-left)
+let mode='build';   // 'build' | 'play'
+
+/* ---------- CANVAS SIZING ---------- */
+function resize(){
+  const wrap=cv.parentElement;
+  W=wrap.clientWidth; H=wrap.clientHeight; DPR=Math.min(window.devicePixelRatio||1,2);
+  cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
+  groundY = H - GRID*1.5;
+}
+window.addEventListener('resize',resize);
+
+/* ---------- TAP TO SELECT, TAP TO PLACE ----------
+   1. Tap a part in the tray -> it highlights (selected).
+   2. Tap the build area -> the part drops there.
+   3. Long-press a placed part (~half a second) -> it is deleted.
+   4. Undo / Redo step backward and forward through your changes. */
+let selectedType=null;
+let hoverCell=null; // {gx,gy,ok} preview while a part is selected
+
+/* ---- history: snapshot placed[] for undo / redo ---- */
+let undoStack=[], redoStack=[];
+function snapshot(){ return placed.map(o=>({type:o.type,gx:o.gx,gy:o.gy})); }
+function pushHistory(){ undoStack.push(snapshot()); if(undoStack.length>60)undoStack.shift(); redoStack=[]; updateHistoryButtons(); }
+function updateHistoryButtons(){
+  undoBtn.disabled = undoStack.length===0;
+  redoBtn.disabled = redoStack.length===0;
+}
+function doUndo(){
+  if(!undoStack.length) return;
+  if(mode==='play') stop();
+  redoStack.push(snapshot());
+  placed = undoStack.pop();
+  hint.style.opacity = placed.length? '0':'1';
+  updateHistoryButtons();
+}
+function doRedo(){
+  if(!redoStack.length) return;
+  if(mode==='play') stop();
+  undoStack.push(snapshot());
+  placed = redoStack.pop();
+  hint.style.opacity = placed.length? '0':'1';
+  updateHistoryButtons();
+}
+
+function selectPart(type){
+  if(selectedType===type){ selectedType=null; } else { selectedType=type; }
+  hoverCell=null;
+  for(const b of tray.querySelectorAll('.part-btn')) b.classList.toggle('selected', b.dataset.type===selectedType);
+  if(selectedType) flash("Now tap the grid to place your "+PARTS[selectedType].name+"!");
+}
+
+tray.addEventListener('click',e=>{
+  const btn=e.target.closest('.part-btn');
+  if(!btn) return;
+  if(mode==='play'){ flash("Press STOP to build! ✋"); return; }
+  selectPart(btn.dataset.type);
+});
+
+// snap a screen point to a grid cell for the currently selected part
+function cellAt(px,py){
+  const p=PARTS[selectedType];
+  let gx=Math.round((px-p.w*GRID/2)/GRID);
+  let gy=Math.round((py-p.h*GRID/2)/GRID);
+  // Keep pieces clear of the parts tray, whichever edge it's docked to: a wide
+  // tray is the mobile top bar (reserve rows below it); otherwise it's the left
+  // sidebar (reserve columns to its right).
+  const topBar = tray.offsetWidth > tray.offsetHeight;
+  const minGx = topBar ? 0 : Math.ceil((tray.offsetWidth+24)/GRID);
+  const minGy = topBar ? Math.ceil((tray.offsetHeight+16)/GRID) : 0;
+  const maxgy=Math.floor(groundY/GRID)-p.h;
+  gy=Math.max(minGy,Math.min(gy,maxgy));
+  gx=Math.max(minGx,Math.min(gx,Math.floor(W/GRID)-p.w));
+  let ok=true;
+  for(const o of placed){
+    const op=PARTS[o.type];
+    if(gx<o.gx+op.w && gx+p.w>o.gx && gy<o.gy+op.h && gy+p.h>o.gy){ ok=false; break; }
+  }
+  return {gx,gy,ok};
+}
+
+function evtPos(e){ const r=cv.getBoundingClientRect(); return {x:e.clientX-r.left, y:e.clientY-r.top}; }
+
+// index of the placed part under a screen point, or -1
+function partAt(x,y){
+  for(let i=placed.length-1;i>=0;i--){
+    const o=placed[i], op=PARTS[o.type];
+    if(x>=o.gx*GRID && x<=(o.gx+op.w)*GRID && y>=o.gy*GRID && y<=(o.gy+op.h)*GRID) return i;
+  }
+  return -1;
+}
+
+/* ---- long-press to delete ---- */
+let pressTimer=null, pressStart=null, longFired=false, pressIdx=-1, pressT0=0;
+const LONG_MS=480, MOVE_TOL=12;
+let deleteCandidate=-1; // part being "armed" for delete (drawn pulsing)
+
+function clearPress(){ clearTimeout(pressTimer); pressTimer=null; pressStart=null; deleteCandidate=-1; }
+
+cv.addEventListener('pointerdown',e=>{
+  if(mode==='play') return;
+  const {x,y}=evtPos(e);
+  longFired=false;
+  pressStart={x,y};
+  pressIdx=partAt(x,y);
+  if(pressIdx>=0){
+    deleteCandidate=pressIdx;
+    pressT0=performance.now();
+    pressTimer=setTimeout(()=>{
+      // long press completed on a part -> delete it
+      longFired=true;
+      pushHistory();
+      const removed=placed.splice(deleteCandidate,1)[0];
+      flash("Deleted "+PARTS[removed.type].name+" 🗑️");
+      if(!placed.length) hint.style.opacity='1';
+      clearPress();
+    },LONG_MS);
+  }
+});
+cv.addEventListener('pointermove',e=>{
+  // live placement preview
+  if(mode==='build'&&selectedType){ const {x,y}=evtPos(e); hoverCell=cellAt(x,y); }
+  else hoverCell=null;
+  // cancel a long-press if the finger drifts
+  if(pressStart){
+    const {x,y}=evtPos(e);
+    if(Math.hypot(x-pressStart.x,y-pressStart.y)>MOVE_TOL) clearPress();
+  }
+});
+cv.addEventListener('pointerup',clearPress);
+cv.addEventListener('pointercancel',clearPress);
+cv.addEventListener('pointerleave',()=>{ hoverCell=null; clearPress(); });
+
+// short tap: place the selected part
+cv.addEventListener('click',e=>{
+  if(mode==='play') return;
+  if(longFired){ longFired=false; return; }   // the long-press already handled this
+  const {x,y}=evtPos(e);
+  if(!selectedType){
+    if(partAt(x,y)>=0) flash("Hold a part down to delete it 🗑️");
+    else flash("Tap a part on the left first 👈");
+    return;
+  }
+  const c=cellAt(x,y);
+  if(!c.ok){ flash("Something's already there!"); return; }
+  pushHistory();
+  placed.push({type:selectedType,gx:c.gx,gy:c.gy});
+  hint.style.opacity='0';
+});
+
+clearBtn.addEventListener('click',(e)=>{
+  e.stopPropagation();
+  if(mode==='play')stop();
+  if(placed.length) pushHistory();
+  placed.length=0; selectedType=null;       // mutate in place so all references update
+  for(const b of tray.querySelectorAll('.part-btn'))b.classList.remove('selected');
+  hoverCell=null; hint.style.opacity='1';
+  flash("Cleared! Tap a part to start building");
+});
+undoBtn.addEventListener('click',(e)=>{ e.stopPropagation(); doUndo(); });
+redoBtn.addEventListener('click',(e)=>{ e.stopPropagation(); doRedo(); });
+// keyboard niceties for desktop
+window.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key==='z'&&!e.shiftKey){ e.preventDefault(); doUndo(); }
+  else if((e.ctrlKey||e.metaKey)&&(e.key==='y'||(e.key==='z'&&e.shiftKey))){ e.preventDefault(); doRedo(); }
+});
+
+
+/* ============================================================
+   PHYSICS  (Verlet integration + distance constraints)
+   ============================================================ */
+let bodies=[]; // points {x,y,px,py,pinned,r,mass,part,role}
+let sticks=[]; // {a,b,len,stiff}
+let groups=[]; // visual quads for boxes
+let wheelsList=[];
+let boosters=[];
+let motors=[];
+const GRAV=0.55;
+// Booster = LIFT ROCKET. Each frame it pushes its own nodes straight up. While
+// fuelled this push beats gravity so the rig climbs/hovers; when its own battery
+// fades the thrust dies and gravity brings the rig back down. Tune BOOST_LIFT for
+// how strongly it flies (must stay > GRAV to leave the ground).
+const BOOST_LIFT=0.9;
+// Spring = SOFT SUSPENSION. It squishes only along ONE axis (the one the white
+// coil lines run perpendicular to — i.e. vertically). The two edges along that
+// axis are soft springs (SPRING_STIFF); the cross plates stay rigid so the width
+// can't change, and soft diagonal braces (SPRING_BRACE) resist leaning/shearing
+// without locking the squish. Lower = squishier.
+const SPRING_STIFF=0.08;
+const SPRING_BRACE=0.25;
+// Battery: every powered part carries its OWN battery — each MOTOR and each
+// BOOSTER. It runs at full for (MOTOR_RUN-MOTOR_FADE) frames, then eases to zero
+// across MOTOR_FADE frames so things coast to a smooth stop. ~60fps.
+const MOTOR_RUN=720, MOTOR_FADE=240;   // ~12s total, last ~4s is a gentle wind-down
+// 0..1 charge curve: full, then a smoothstep wind-down over the last FADE frames.
+function lifePower(life){ if(life>MOTOR_FADE) return 1; const t=life/MOTOR_FADE; return t*t*(3-2*t); }
+// All motors share ONE combined battery (their charges pooled) that drives every
+// wheel, so the whole rig revs up and stops together. More motors = bigger battery.
+let motorLife=0, motorFull=0, motorPower=0;
+
+function startPlay(){
+  if(placed.length===0){ flash("Build something first! 🧱"); return; }
+  buildPhysics();
+  mode='play'; goBtn.classList.add('playing'); goBtn.innerHTML='■ STOP';
+  tray.classList.add('hidden');          // more room for the action while playing
+}
+function stop(){
+  mode='build'; goBtn.classList.remove('playing'); goBtn.innerHTML='▶ GO!';
+  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];motors=[];
+  tray.classList.remove('hidden');       // bring the parts back to keep building
+}
+goBtn.addEventListener('click',(e)=>{ e.stopPropagation(); mode==='build'?startPlay():stop(); });
+
+function addPoint(x,y,o={}){ const p={x,y,px:x,py:y,pinned:false,r:6,mass:1,...o}; bodies.push(p); return p; }
+function addStick(a,b,stiff=1){ sticks.push({a,b,len:Math.hypot(a.x-b.x,a.y-b.y),stiff}); }
+
+function buildPhysics(){
+  bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];motors=[];
+  const weightGroups=[];   // corner sets that need bracing to their full contact
+  // node grid shared between adjacent boxes so the rig is one connected structure
+  const nodeMap={};
+  function node(gx,gy,extra){ const k=gx+','+gy; if(nodeMap[k])return nodeMap[k];
+    const n=addPoint(gx*GRID, gy*GRID, extra); nodeMap[k]=n; return n; }
+
+  // --- AUTO-TILT PRE-PASS ---
+  // A beam that bridges a BIG wheel on one side and a SMALL wheel on the other
+  // snaps to a tilt matching the height difference between the two hubs (see
+  // beamTiltFor). Computed via the shared helper so physics + preview agree.
+  const beamTilt = new Map();
+  for(const it of placed){ const t=beamTiltFor(it); if(t) beamTilt.set(it,t); }
+
+  for(const it of placed){
+    const p=PARTS[it.type];
+    if(p.kind==='wheel'){
+      const cx=(it.gx+p.w/2)*GRID, cy=(it.gy+p.h/2)*GRID;
+      const rad=p.r*GRID*0.9;
+      // A wheel is a single hub point with a spin angle. Rotation is tracked
+      // as a number (not emergent from a verlet rim) so the motor can drive it
+      // reliably, and traction converts that spin into forward push on contact.
+      const hub=addPoint(cx,cy,{r:rad,mass:p.mass,role:'hub',isWheel:true});
+      const w={hub,rad,color:p.color,angle:0,spin:0,big:p.r>=1,it,p};
+      hub.wheel=w;
+      wheelsList.push(w);
+    } else if(it.type==='beam' && beamTilt.has(it)){
+      // tilted beam: build a rotated quad spanning the two wheel tops, with its
+      // own (non grid-shared) corner nodes so the tilt holds.
+      const t=beamTilt.get(it);
+      const h=p.h*GRID, hw=h/2;                       // beam thickness
+      const nx=Math.cos(t.angle), ny=Math.sin(t.angle);   // along beam
+      const px=-ny, py=nx;                                // perpendicular (up)
+      const a=addPoint(t.ax - px*hw, t.ay - py*hw, {mass:p.mass/4});
+      const b=addPoint(t.bx - px*hw, t.by - py*hw, {mass:p.mass/4});
+      const c=addPoint(t.bx + px*hw, t.by + py*hw, {mass:p.mass/4});
+      const d=addPoint(t.ax + px*hw, t.ay + py*hw, {mass:p.mass/4});
+      addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
+      groups.push({nodes:[a,b,c,d],color:p.color,type:it.type,kind:p.kind,tilted:true});
+    } else {
+      // box: 4 corner nodes (a=top-left, b=top-right, c=bottom-right, d=bottom-left)
+      const a=node(it.gx,it.gy,{mass:p.mass/4});
+      const b=node(it.gx+p.w,it.gy,{mass:p.mass/4});
+      const c=node(it.gx+p.w,it.gy+p.h,{mass:p.mass/4});
+      const d=node(it.gx,it.gy+p.h,{mass:p.mass/4});
+      if(it.type==='spring'){
+        // soft suspension that squishes ONLY along the vertical axis:
+        //   top & bottom plates rigid  -> width can't change
+        //   left & right edges soft    -> the one axis it compresses on
+        //   diagonals soft braces      -> resist lean/shear but still let it squish
+        addStick(a,b,1); addStick(d,c,1);                        // rigid plates
+        addStick(d,a,SPRING_STIFF); addStick(c,b,SPRING_STIFF);  // soft squish axis
+        addStick(a,c,SPRING_BRACE); addStick(b,d,SPRING_BRACE);  // anti-shear braces
+        [a,b,c,d].forEach(n=>n.soft=true);   // flag so bracing never stiffens it
+      } else {
+        addStick(a,b);addStick(b,c);addStick(c,d);addStick(d,a);addStick(a,c,.9);addStick(b,d,.9);
+      }
+      const g={nodes:[a,b,c,d],color:p.color,type:it.type,kind:p.kind};
+      groups.push(g);
+      if(it.type==='weight'){ [a,b,c,d].forEach(n=>n.mass*=3); weightGroups.push([a,b,c,d]); }
+      if(it.type==='booster'){ const bo={nodes:[a,b,c,d],life:MOTOR_RUN,power:1}; boosters.push(bo); g.booster=bo; }
+      if(p.kind==='motor'){ motors.push({nodes:[a,b,c,d], run:p.run}); g.motor=true; }
+    }
+  }
+  // Second pass: now that every chassis node exists, attach each wheel's axle
+  // to the structure around it.
+  for(const w of wheelsList){ attachToStructure(w.hub, nodeMap, w.it, w.p); }
+  // Boosters and weights bolt every corner to all nearby structure nodes, not just
+  // the two grid-shared ones. Otherwise a lone one hinges on a single shared edge —
+  // a booster's thrust spins the rig, a heavy weight droops off the edge. Bracing
+  // the whole contact surface makes them sit flush.
+  for(const b of boosters){ braceToStructure(b.nodes, nodeMap); }
+  for(const wn of weightGroups){ braceToStructure(wn, nodeMap); }
+  // Pool every motor's charge into one shared battery. Any motor drives ALL
+  // wheels off this battery, so they spin up and stop together. No motor: wheels
+  // just roll freely.
+  hasMotor = motors.length>0;
+  motorFull = motors.reduce((s,m)=>s+m.run, 0);   // each motor adds its own run to the pool
+  motorLife = motorFull;
+}
+let hasMotor=false;
+
+function attachToStructure(hub,nodeMap,it,p){
+  // Connect the wheel's axle (hub) to the chassis so the body rides on the wheel.
+  // We connect to every structure node within reach; if none exist yet, the wheel
+  // still works on its own. The rotation of the wheel is tracked separately
+  // (w.angle), so these sticks hold position without fighting the spin.
+  const reach = GRID*(p.r>=1?2.2:1.7);
+  let connected=0;
+  for(const k in nodeMap){
+    const n=nodeMap[k];
+    const d=Math.hypot(n.x-hub.x,n.y-hub.y);
+    if(d<reach){ addStick(hub,n,1); connected++; }
+  }
+  // also bolt to other wheel hubs nearby (shared axle), so multi-wheel rigs hold together
+  for(const w of wheelsList){
+    if(w.hub===hub) continue;
+    const d=Math.hypot(w.hub.x-hub.x,w.hub.y-hub.y);
+    if(d<GRID*3){ addStick(w.hub,hub,.8); }
+  }
+  hub.connected=connected;
+}
+
+function braceToStructure(nodes, nodeMap){
+  // Stiffly tie each of the part's corners to every other structure node within
+  // reach (one cell away), so the part fuses to the whole surface it touches
+  // rather than hanging off a single shared edge.
+  const reach = GRID*1.5;
+  for(const n of nodes){
+    if(n.soft) continue;              // don't anchor from a spring node
+    for(const k in nodeMap){
+      const m=nodeMap[k];
+      if(m===n || m.soft) continue;   // never bridge across a spring (keeps it squishy)
+      const d=Math.hypot(m.x-n.x, m.y-n.y);
+      if(d>0.001 && d<reach){ addStick(n,m,1); }
+    }
+  }
+}
+
+let animTime=0;
+function physicsStep(){
+  animTime++;
+  // integrate
+  for(const p of bodies){
+    if(p.pinned) continue;
+    const vx=(p.x-p.px)*0.99, vy=(p.y-p.py)*0.99;
+    p.px=p.x; p.py=p.y;
+    p.x+=vx; p.y+=vy+GRAV;
+  }
+  // POWERED PARTS — each motor and each booster drains its OWN battery, easing
+  // from full to zero (smoothstep) so the rig coasts/settles instead of stopping
+  // dead.
+  // combined motor battery drains as one; every wheel reads the same power.
+  motorLife = Math.max(0, motorLife-1);
+  motorPower = hasMotor ? lifePower(motorLife) : 0;
+  for(const b of boosters){ b.life=Math.max(0,b.life-1); b.power=lifePower(b.life); }
+
+  // WHEELS — every wheel is driven off the shared motor battery (so they spin up
+  // and wind down together); with no motor they all just roll freely. Traction is
+  // a soft contact factor (not on/off) so a brief hop or bump doesn't kill the drive.
+  for(const w of wheelsList){
+    const base = w.big ? 5.5 : 4.0;
+    w.spin += (base*motorPower - w.spin) * 0.06;        // ease toward target (rev up / wind down)
+
+    // soft ground contact against the terrain surface (flat ground or ramp)
+    const surf = terrainY(w.hub.x);
+    const gap = (surf - w.rad) - w.hub.y;               // >0 means airborne
+    const contact = gap <= 0 ? 1 : Math.max(0, 1 - gap/18);
+    if(hasMotor && Math.abs(w.spin) > 0.01){
+      const drive = w.spin * w.rad * 0.045 * contact;    // scale push by contact
+      w.hub.x += drive;
+      w.angle += w.spin * 0.06;
+    } else {
+      const vx = w.hub.x - w.hub.px;                     // free wheel rolls with motion
+      w.angle += vx / Math.max(w.rad,1);
+    }
+  }
+  // BOOSTERS — a lift rocket: steady upward thrust (with a little wobble) while
+  // fuelled. The push beats gravity so the rig climbs; as its battery fades gravity
+  // wins again and the rig settles back down.
+  // Springs need no per-frame work: their soft sticks cushion bumps on their own.
+  for(const b of boosters){
+    const lift = BOOST_LIFT * b.power;
+    if(lift>0) for(const n of b.nodes){ n.y-=lift; n.x+=Math.sin(animTime*0.2)*0.05; }
+  }
+  // constraints (several iterations for stiffness)
+  for(let k=0;k<6;k++){
+    for(const s of sticks){
+      const dx=s.b.x-s.a.x, dy=s.b.y-s.a.y;
+      const d=Math.hypot(dx,dy)||0.001;
+      const diff=(s.len-d)/d*0.5*s.stiff;
+      const ma=s.b.mass/(s.a.mass+s.b.mass), mb=s.a.mass/(s.a.mass+s.b.mass);
+      if(!s.a.pinned){ s.a.x-=dx*diff*ma; s.a.y-=dy*diff*ma; }
+      if(!s.b.pinned){ s.b.x+=dx*diff*mb; s.b.y+=dy*diff*mb; }
+    }
+    // collisions with terrain surface & left wall
+    for(const p of bodies){
+      const surf = terrainY(p.x);          // ground height under this point
+      if(p.y > surf - p.r){
+        p.y = surf - p.r;
+        // Wheels roll: almost no horizontal braking so the drive push survives.
+        // Other parts grip: strong braking so the rig doesn't slide like ice.
+        const brake = p.isWheel ? 0.02 : 0.30;
+        p.x -= (p.x - p.px) * brake;
+        // on a slope, a touch of gravity pulls the contact point downhill, so
+        // climbing a ramp actually costs effort (and a stalled rig rolls back)
+        const slope = terrainSlope(p.x);
+        if(Math.abs(slope)>0.02){ p.x -= slope*0.9; }
+      }
+      // Left wall only — the world extends endlessly to the right.
+      if(p.x<p.r){p.x=p.r;}
+      if(p.y<p.r){p.y=p.r;}
+    }
+  }
+}
+
+/* ---------- distance traveled & celebration ---------- */
+let startCx=null, celebrated=false;
+function rigCenterX(){ if(!bodies.length)return 0; let s=0; for(const b of bodies)s+=b.x; return s/bodies.length; }
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+/* ---------- ENDLESS PARALLAX BACKGROUND ----------
+   camX is how far the camera has scrolled right (in world px). Each scenery
+   layer repeats over a fixed spacing and scrolls at a fraction of camX, so
+   nearer layers move faster — that difference is what reads as "speed".
+   rigSpeed (0..1) adds motion blur streaks when the rig is really moving. */
+function drawBackground(camX, rigSpeed, zoom){
+  zoom = zoom||1;
+  ctx.clearRect(0,0,W,H);
+
+  // --- sky gradient (full screen backdrop, never zoomed) ---
+  const sky=ctx.createLinearGradient(0,0,0,groundY);
+  sky.addColorStop(0,'#FFE9C7'); sky.addColorStop(1,'#FFF3E2');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,groundY);
+
+  // --- soft sun (fixed) ---
+  ctx.fillStyle='rgba(255,236,180,.7)';
+  ctx.beginPath();ctx.arc(W-80,80,50,0,7);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.35)';
+  ctx.beginPath();ctx.arc(W-80,80,34,0,7);ctx.fill();
+
+  // scenery (hills, clouds, trees, ground) scales gently with the camera zoom,
+  // pivoting on the ground line so the horizon stays put as it shrinks.
+  ctx.save();
+  const pivotY=groundY;
+  ctx.translate(W*ANCHOR, pivotY); ctx.scale(zoom,zoom); ctx.translate(-W*ANCHOR,-pivotY);
+
+  // --- layer 1: far rolling hills (slow: 0.15x) ---
+  drawLayer(camX*0.15, 360, groundY, [
+    (bx)=>hill(bx, groundY, 230, 110, '#B7E0A8'),
+  ]);
+  // --- layer 2: closer hills + far clouds (0.3x) ---
+  drawLayer(camX*0.30, 300, groundY, [
+    (bx)=>hill(bx+40, groundY, 170, 78, '#A2D690'),
+  ]);
+  // --- clouds (0.22x) drift across the sky and wrap ---
+  drawLayer(camX*0.22, 340, 0, [
+    (bx)=>cloud(bx+60, 70, 1),
+    (bx)=>cloud(bx+220, 120, .65),
+  ]);
+
+  ctx.restore();   // end scenery zoom — sky/hills/clouds done
+
+  // --- ground band (full screen, never zoomed, so no gap at the bottom) ---
+  ctx.fillStyle=getCSS('--ground');
+  ctx.fillRect(0,groundY,W,H-groundY);
+  ctx.fillStyle=getCSS('--ground-dk');
+  ctx.fillRect(0,groundY,W,7);
+
+  // --- layer 3: trees/bushes sitting on the ground (0.6x) ---
+  drawLayer(camX*0.6, 260, 0, [
+    (bx)=>bush(bx+30, groundY),
+    (bx)=>tree(bx+150, groundY),
+  ]);
+
+  // --- layer 4: near grass tufts + road dashes (1x, fastest = same as rig) ---
+  drawLayer(camX, 90, 0, [
+    (bx)=>tuft(bx, groundY),
+  ]);
+  // dashed road line just below the surface to emphasise motion
+  ctx.strokeStyle='rgba(255,255,255,.5)';ctx.lineWidth=5;ctx.lineCap='round';
+  drawLayer(camX, 120, 0, [
+    (bx)=>{ ctx.beginPath();ctx.moveTo(bx,groundY+22);ctx.lineTo(bx+55,groundY+22);ctx.stroke(); },
+  ]);
+
+  // --- speed streaks when moving fast ---
+  if(rigSpeed>0.12){
+    const n=Math.min(Math.floor(rigSpeed*14),14);
+    ctx.strokeStyle='rgba(255,255,255,'+Math.min(rigSpeed*0.5,0.35)+')';
+    ctx.lineWidth=3;ctx.lineCap='round';
+    for(let i=0;i<n;i++){
+      const y=30+ (i*53 + (streakT*rigSpeed*60)) % (groundY-20);
+      const len=40+rigSpeed*70;
+      const sx=(W - ((streakT*rigSpeed*90 + i*137)% (W+len)));
+      ctx.beginPath();ctx.moveTo(sx,y);ctx.lineTo(sx-len,y);ctx.stroke();
+    }
+  }
+
+  // --- build-mode grid dots ---
+  if(mode==='build'){
+    ctx.fillStyle='rgba(58,46,69,.10)';
+    for(let x=GRID/2;x<W;x+=GRID){ for(let y=GRID/2;y<groundY;y+=GRID){ ctx.beginPath();ctx.arc(x,y,2.2,0,7);ctx.fill(); } }
+  }
+}
+let streakT=0;
+
+// Repeats a set of draw functions every `spacing` px across the screen, offset
+// by `scroll`, so the scenery is seamless and endless. yBase unused (kept for clarity).
+function drawLayer(scroll, spacing, yBase, drawFns){
+  const off = ((scroll % spacing) + spacing) % spacing;
+  for(let x=-spacing-off; x<W+spacing; x+=spacing){
+    for(const fn of drawFns) fn(x);
+  }
+}
+
+function hill(x,gy,w,h,color){
+  ctx.fillStyle=color;
+  ctx.beginPath();
+  ctx.moveTo(x-w/2,gy);
+  ctx.quadraticCurveTo(x,gy-h,x+w/2,gy);
+  ctx.closePath();ctx.fill();
+}
+function bush(x,gy){
+  ctx.fillStyle='#7BC86A';
+  ctx.beginPath();
+  ctx.arc(x,gy-14,18,0,7);ctx.arc(x+20,gy-10,14,0,7);ctx.arc(x-18,gy-9,13,0,7);
+  ctx.rect(x-30,gy-12,60,14);ctx.fill();
+}
+function tree(x,gy){
+  ctx.fillStyle='#9A6A45';ctx.fillRect(x-5,gy-46,10,46);          // trunk
+  ctx.fillStyle='#6FB85C';
+  ctx.beginPath();ctx.arc(x,gy-58,24,0,7);ctx.arc(x-18,gy-46,16,0,7);ctx.arc(x+18,gy-46,16,0,7);ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.18)';
+  ctx.beginPath();ctx.arc(x-6,gy-64,10,0,7);ctx.fill();
+}
+function tuft(x,gy){
+  ctx.strokeStyle='#5FA84D';ctx.lineWidth=3;ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(x,gy);ctx.lineTo(x-4,gy-10);
+  ctx.moveTo(x,gy);ctx.lineTo(x,gy-13);
+  ctx.moveTo(x,gy);ctx.lineTo(x+4,gy-10);
+  ctx.stroke();
+}
+function cloud(x,y,s){ ctx.fillStyle='rgba(255,255,255,.7)';ctx.beginPath();ctx.arc(x,y,22*s,0,7);ctx.arc(x+24*s,y+6*s,17*s,0,7);ctx.arc(x-22*s,y+6*s,15*s,0,7);ctx.rect(x-22*s,y,46*s,16*s);ctx.fill(); }
+function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+// Draw terrain features (ramps) as solid earth wedges sitting on the ground.
+// Drawn in WORLD coords; caller has already translated by -camX during play.
+function drawTerrain(camX){
+  const g=getCSS('--ground'), gd=getCSS('--ground-dk');
+  for(const f of level.features){
+    if(f.type!=='ramp') continue;
+    const upEnd=f.x+f.run, topEnd=upEnd+f.top, downEnd=topEnd+f.run;
+    // cull if entirely off-screen
+    if(downEnd < camX-40 || f.x > camX+W+40) continue;
+    const yTop=groundY - f.rise;
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    ctx.moveTo(f.x, groundY);
+    ctx.lineTo(upEnd, yTop);
+    ctx.lineTo(topEnd, yTop);
+    ctx.lineTo(downEnd, groundY);
+    ctx.closePath(); ctx.fill();
+    // grassy top edge along the slope
+    ctx.strokeStyle=gd; ctx.lineWidth=6; ctx.lineCap='round'; ctx.lineJoin='round';
+    ctx.beginPath();
+    ctx.moveTo(f.x, groundY);
+    ctx.lineTo(upEnd, yTop);
+    ctx.lineTo(topEnd, yTop);
+    ctx.lineTo(downEnd, groundY);
+    ctx.stroke();
+    // a little flag at the crest so it reads as an obstacle / goal
+    const fx=(upEnd+topEnd)/2;
+    ctx.strokeStyle='#3A2E45'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(fx, yTop); ctx.lineTo(fx, yTop-30); ctx.stroke();
+    ctx.fillStyle='#FF6B9D';
+    ctx.beginPath(); ctx.moveTo(fx, yTop-30); ctx.lineTo(fx+20, yTop-24); ctx.lineTo(fx, yTop-18); ctx.closePath(); ctx.fill();
+  }
+}
+
+function roundRectPath(x,y,w,h,r){ ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath(); }
+
+function drawFace(cx,cy,sz){
+  ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.arc(cx-sz*.18,cy-sz*.05,sz*.12,0,7);ctx.arc(cx+sz*.18,cy-sz*.05,sz*.12,0,7);ctx.fill();
+  ctx.fillStyle='#3A2E45';
+  ctx.beginPath();ctx.arc(cx-sz*.16,cy-sz*.02,sz*.06,0,7);ctx.arc(cx+sz*.20,cy-sz*.02,sz*.06,0,7);ctx.fill();
+  ctx.strokeStyle='#3A2E45';ctx.lineWidth=sz*.05;ctx.lineCap='round';
+  ctx.beginPath();ctx.arc(cx,cy+sz*.1,sz*.16,0.15*Math.PI,0.85*Math.PI);ctx.stroke();
+}
+
+// The motor's glowing power core. A bigger, brighter core means more power (and
+// weight). coreFrac is set per motor type; pulse animates it gently during play.
+function drawMotorCore(cx,cy,sz,coreFrac,pulse){
+  const r = sz*(0.13 + 0.25*coreFrac) * (pulse||1);
+  ctx.fillStyle='rgba(255,138,91,.35)';
+  ctx.beginPath();ctx.arc(cx,cy,r*1.25,0,7);ctx.fill();
+  ctx.fillStyle='#FF8A5B';
+  ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.fill();
+  ctx.fillStyle='#FFD84D';
+  ctx.beginPath();ctx.arc(cx,cy,r*0.5,0,7);ctx.fill();
+}
+
+function drawBuild(){
+  for(const it of placed){
+    const p=PARTS[it.type];
+    const tilt = it.type==='beam' ? beamTiltFor(it) : null;
+    if(tilt){
+      drawTiltedBeam(tilt, p, p.color, 1);
+    } else {
+      const x=it.gx*GRID, y=it.gy*GRID, w=p.w*GRID, h=p.h*GRID;
+      drawPartShape(it.type,x,y,w,h,p.color);
+    }
+  }
+  // long-press delete feedback: red ring that fills up as you hold
+  if(deleteCandidate>=0 && pressStart){
+    const o=placed[deleteCandidate];
+    if(o){
+      const p=PARTS[o.type];
+      const x=o.gx*GRID, y=o.gy*GRID, w=p.w*GRID, h=p.h*GRID;
+      const prog=Math.min((performance.now()-pressT0)/LONG_MS,1);
+      ctx.save();
+      ctx.globalAlpha=0.25+prog*0.45;
+      ctx.fillStyle='#E86E3F';
+      roundRectPath(x,y,w,h,14); ctx.fill();
+      ctx.globalAlpha=1;
+      ctx.strokeStyle='#E86E3F'; ctx.lineWidth=4;
+      roundRectPath(x-2,y-2,w+4,h+4,16); ctx.stroke();
+      // little arc that sweeps as it fills
+      ctx.strokeStyle='#fff'; ctx.lineWidth=5; ctx.lineCap='round';
+      ctx.beginPath();
+      ctx.arc(x+w/2,y+h/2,Math.min(w,h)*0.32,-Math.PI/2,-Math.PI/2+prog*Math.PI*2);
+      ctx.stroke();
+      ctx.fillStyle='#fff'; ctx.font='bold '+Math.min(w,h)*0.4+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('🗑️',x+w/2,y+h/2);
+      ctx.restore();
+    }
+  }
+  // placement preview ghost
+  if(selectedType && hoverCell){
+    const p=PARTS[selectedType];
+    const x=hoverCell.gx*GRID, y=hoverCell.gy*GRID, w=p.w*GRID, h=p.h*GRID;
+    ctx.save();
+    ctx.globalAlpha=0.5;
+    drawPartShape(selectedType,x,y,w,h,p.color);
+    ctx.globalAlpha=1;
+    // outline: green if ok, red if blocked
+    ctx.lineWidth=4; ctx.setLineDash([8,6]);
+    ctx.strokeStyle=hoverCell.ok?'#2A9189':'#E86E3F';
+    roundRectPath(x-2,y-2,w+4,h+4,16); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+// Draw a beam rotated to a tilt (used in build preview). t has angle + endpoints.
+function drawTiltedBeam(t, p, color, alpha){
+  const h=p.h*GRID;
+  const cx=(t.ax+t.bx)/2, cy=(t.ay+t.by)/2;
+  const len=Math.hypot(t.bx-t.ax, t.by-t.ay);
+  ctx.save();
+  ctx.globalAlpha=alpha;
+  ctx.translate(cx,cy);
+  ctx.rotate(t.angle);
+  // shadow
+  ctx.fillStyle='rgba(58,46,69,.12)';
+  roundRectPath(-len/2+3, -h/2+5, len, h, 14); ctx.fill();
+  // body
+  ctx.fillStyle=color;
+  roundRectPath(-len/2, -h/2, len, h, 14); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,.28)';
+  roundRectPath(-len/2, -h/2, len, h*0.42, 14); ctx.fill();
+  // little face in the middle (kept upright-ish via the rotation)
+  drawFace(0,0,h*0.9);
+  ctx.restore();
+}
+function drawPartShape(type,x,y,w,h,color){
+  ctx.save();
+  if(type==='wheel'||type==='bigwheel'){
+    const cx=x+w/2,cy=y+h/2,r=w/2*0.92;
+    ctx.fillStyle='#3A2E45';ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.fill();
+    ctx.fillStyle=color;ctx.beginPath();ctx.arc(cx,cy,r*0.78,0,7);ctx.fill();
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,r*0.26,0,7);ctx.fill();
+    ctx.restore();return;
+  }
+  // shadow
+  ctx.fillStyle='rgba(58,46,69,.12)';roundRectPath(x+3,y+5,w,h,14);ctx.fill();
+  ctx.fillStyle=color;roundRectPath(x,y,w,h,14);ctx.fill();
+  // top gloss
+  ctx.fillStyle='rgba(255,255,255,.28)';roundRectPath(x,y,w,h*0.42,14);ctx.fill();
+  const kind=PARTS[type].kind;
+  if(kind==='motor'){
+    const sz=Math.min(w,h);
+    drawMotorCore(x+w/2,y+h/2,sz,PARTS[type].core,1);
+    drawFace(x+w/2,y+h/2,sz*0.78);
+  } else if(kind==='box') drawFace(x+w/2,y+h/2,Math.min(w,h));
+  if(type==='weight'){ ctx.fillStyle='#fff';ctx.font='bold '+(h*0.3)+'px sans-serif';ctx.textAlign='center';ctx.fillText('kg',x+w/2,y+h*0.7); }
+  if(type==='booster'){ ctx.fillStyle='rgba(255,255,255,.5)';ctx.beginPath();ctx.arc(x+w/2,y+h*0.35,w*0.18,0,7);ctx.fill(); }
+  if(type==='spring'){ ctx.strokeStyle='#fff';ctx.lineWidth=4;ctx.lineCap='round';ctx.beginPath();
+    for(let i=0;i<4;i++){ctx.moveTo(x+w*0.25,y+h*(0.25+i*0.18));ctx.lineTo(x+w*0.75,y+h*(0.34+i*0.18));}ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawPlay(){
+  // sticks (faint frame)
+  // boxes
+  for(const g of groups){
+    const[a,b,c,d]=g.nodes;
+    ctx.fillStyle='rgba(58,46,69,.12)';
+    ctx.beginPath();ctx.moveTo(a.x+3,a.y+5);ctx.lineTo(b.x+3,b.y+5);ctx.lineTo(c.x+3,c.y+5);ctx.lineTo(d.x+3,d.y+5);ctx.closePath();ctx.fill();
+    ctx.fillStyle=g.color;
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.lineTo(c.x,c.y);ctx.lineTo(d.x,d.y);ctx.closePath();ctx.fill();
+    // gloss top edge
+    ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=5;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    const cx=(a.x+c.x)/2, cy=(a.y+c.y)/2, sz=Math.hypot(b.x-a.x,b.y-a.y);
+    if(g.kind==='motor'){
+      const pulse=1+0.08*Math.sin(animTime*0.15);
+      drawMotorCore(cx,cy,sz,PARTS[g.type].core,pulse);
+      drawFace(cx,cy,sz*0.72);
+    } else if(g.kind==='box') drawFace(cx,cy,sz*0.9);
+    if(g.type==='booster' && g.booster && g.booster.power>0.02){
+      // flame — length tracks remaining fuel, so it shrinks and dies as the
+      // booster runs out of thrust
+      const len=(14+Math.random()*8)*g.booster.power;
+      ctx.fillStyle='#FF8A5B';
+      ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(c.x,c.y);ctx.lineTo((c.x+d.x)/2,(c.y+d.y)/2+len);ctx.closePath();ctx.fill();
+    }
+    if(g.kind==='motor'){
+      // battery gauge lives on the MOTOR itself. Every motor shows the same shared
+      // charge, so all gauges empty in sync: a ring that turns orange when low.
+      const frac=motorFull>0 ? Math.max(0,motorLife/motorFull) : 0;
+      if(frac>0){
+        ctx.strokeStyle=frac>0.33?'#3FC1B7':'#FF8A5B';
+        ctx.lineWidth=4;ctx.lineCap='round';
+        ctx.beginPath();
+        ctx.arc(cx,cy,sz*0.5,-Math.PI/2,-Math.PI/2+frac*Math.PI*2);
+        ctx.stroke();
+      }
+    }
+  }
+  // wheels
+  for(const w of wheelsList){
+    ctx.fillStyle='#3A2E45';ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad,0,7);ctx.fill();
+    ctx.fillStyle=w.color;ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad*0.78,0,7);ctx.fill();
+    // spokes that turn with the tracked angle so you can see it roll
+    ctx.strokeStyle='#fff';ctx.lineWidth=4;ctx.lineCap='round';
+    for(let i=0;i<4;i++){
+      const a=w.angle + i*Math.PI/2;
+      ctx.beginPath();
+      ctx.moveTo(w.hub.x,w.hub.y);
+      ctx.lineTo(w.hub.x+Math.cos(a)*w.rad*0.7, w.hub.y+Math.sin(a)*w.rad*0.7);
+      ctx.stroke();
+    }
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad*0.22,0,7);ctx.fill();
+    // when a motor is present every wheel is driven, so each gets a teal hub dot;
+    // the battery gauge itself lives on the motor.
+    if(hasMotor){
+      ctx.fillStyle='#3FC1B7';ctx.beginPath();ctx.arc(w.hub.x,w.hub.y,w.rad*0.12,0,7);ctx.fill();
+    }
+  }
+}
+
+/* ---------- main loop ---------- */
+/* ---------- camera: keeps the rig on screen while the world scrolls past ---------- */
+let camX=0;                       // how far the world has scrolled
+const ANCHOR=0.42;                // rig is held around 42% across the screen
+let zoom=1;                       // camera zoom (1 = normal, <1 = zoomed out)
+const MIN_ZOOM=0.62;              // most we zoom out at top speed
+let lastRigX=0, rigSpeedSmooth=0, motorDone=false;
+
+function loop(){
+ try{
+  if(mode==='play'){
+    physicsStep();
+    if(startCx===null){ startCx=rigCenterX(); celebrated=false; camX=0; lastRigX=startCx; }
+
+    const rx=rigCenterX();
+    // camera target so the rig sits at ANCHOR of the viewport; never scroll left of 0
+    const targetCam=Math.max(0, rx - W*ANCHOR);
+    camX += (targetCam-camX)*0.12;           // smooth follow
+
+    // measure speed (world px/frame) for streaks + bg intensity
+    const inst=Math.abs(rx-lastRigX); lastRigX=rx;
+    rigSpeedSmooth += (inst-rigSpeedSmooth)*0.1;
+    streakT++;
+    const rigSpeed=Math.min(rigSpeedSmooth/9, 1);   // normalise to 0..1
+
+    // when the rig is really moving, zoom the camera out a bit so you can see
+    // more of the track ahead. eases between 1.0 (slow) and MIN_ZOOM (fast).
+    const targetZoom = 1 - (1-MIN_ZOOM)*rigSpeed;
+    zoom += (targetZoom - zoom)*0.06;               // smooth, no popping
+
+    // pivot point on screen where the rig sits; we scale around it so the rig
+    // stays put while the world shrinks/grows around it.
+    const pivotX = W*ANCHOR, pivotY = groundY;
+
+    drawBackground(camX, rigSpeed, zoom);
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.scale(zoom, zoom);
+    ctx.translate(-pivotX, -pivotY);
+    ctx.translate(-camX,0);                  // shift the world so the rig stays framed
+    drawTerrain(camX);
+    drawPlay();
+    ctx.restore();
+
+    const dist=rx-startCx;
+    if(dist>W*0.9 && !celebrated){ celebrated=true; flashBig("🎉 Amazing rig!","Look at it go!"); }
+    if(hasMotor && motorLife===0 && !motorDone){ motorDone=true; flash("Motor wound down — press STOP to build again 🔋"); }
+  } else {
+    startCx=null; camX=0; rigSpeedSmooth=0; motorDone=false; zoom=1;
+    drawBackground(0, 0, 1);
+    drawTerrain(0);     // show the ramp in build mode too, so kids know it's there
+    drawBuild();
+  }
+ }catch(err){ console.error('loop frame error:',err); }
+ requestAnimationFrame(loop);
+}
+
+/* ---------- toasts ---------- */
+let toastT;
+function flash(msg){ hint.textContent=msg; hint.style.opacity='1'; clearTimeout(toastT); toastT=setTimeout(()=>{ if(mode==='build'&&placed.length)hint.style.opacity='0'; },1600); }
+let bigT;
+function flashBig(msg,sub){
+  toast.innerHTML = msg + (sub? '<small>'+sub+'</small>' : '');
+  toast.classList.add('show');
+  clearTimeout(bigT);
+  bigT=setTimeout(()=>toast.classList.remove('show'),2200);
+}
+updateHistoryButtons();
+generateLevel();     // one randomized course per page load
+resize();
+loop();
+
+/* friendly first-time tips cycle */
+const tips=["Tap a part, then tap the grid to place it!","Tip: put a Motor next to a Wheel to drive it!","Tip: a Mega Motor drives farther; a Mini runs out fast.","Tip: add Boosters to blast off and fly! 🚀","Tip: a Spring cushions bumps and hard landings.","Tip: hold a part down to delete it 🗑️","Tip: use ↶ undo and ↷ redo to fix mistakes.","Tip: add a Weight down low to stay balanced."];
+let ti=0;
+setInterval(()=>{ if(mode==='build'&&placed.length===0){ hint.textContent=tips[ti%tips.length]; hint.style.opacity='1'; ti++; } },3500);
+</script>
+</body>
+</html>
+>>>>>>> parent of d0ed1b8 (landscape change and credits change)
