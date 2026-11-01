@@ -22,6 +22,7 @@
     <div class="tray" id="tray"><h2>Parts</h2></div>
     <div class="stage-wrap">
       <canvas id="cv"></canvas>
+      <div class="distance" id="distBadge">🏁 0 m</div>
       <div class="hint" id="hint">Tap a part on the left, then tap the grid to place it</div>
       <div class="controls">
         <button class="btn go" id="goBtn">▶ GO!</button>
@@ -60,6 +61,7 @@ const undoBtn = document.getElementById('undoBtn');
 const redoBtn = document.getElementById('redoBtn');
 const hint = document.getElementById('hint');
 const toast = document.getElementById('toast');
+const distBadge = document.getElementById('distBadge');
 
 let W=0,H=0,DPR=1;
 const GRID=46;                 // grid cell size in CSS px
@@ -78,13 +80,32 @@ let groundY=0;
      rise = how high the crest sits above the ground
    ============================================================ */
 let level={ features:[] };
+let nextRampX=0;              // world x where the next endless ramp will be placed
 
-function buildLevel(){
-  // One fixed ramp partway along. groundY must be known (after resize()).
-  // Placed well to the right of the start so the rig builds up speed first.
-  level={ features:[
-    { type:'ramp', x: 900, run: 175, top: 90, rise: 95 },
-  ]};
+// The tallest a ramp can get — this is the height of the original single ramp, now
+// the upper bound for the big ramps. Small ramps are much shorter bumps.
+const RAMP_MAX_RISE = 95;
+
+// Clear the course and set where the first ramp begins (a short flat runway so the
+// rig can build speed). Ramps are then created lazily by ensureRamps as the road
+// scrolls into view.
+function resetLevel(){
+  level={ features:[] };
+  nextRampX = 700 + Math.random()*320;
+}
+
+// Endless runner: keep appending ramps until the course covers world x `toX`, so a
+// new ramp pops into existence just ahead of the road as it appears. Heights vary
+// from small bumps up to RAMP_MAX_RISE, and the slope length scales with height so
+// even the big ramps stay climbable. Only ever appends → terrain is stable per frame.
+function ensureRamps(toX){
+  while(nextRampX < toX){
+    const rise = Math.round(32 + Math.random()*(RAMP_MAX_RISE-32));   // 32 (small) .. 95 (big)
+    const run  = Math.round(rise * (1.6 + Math.random()*0.9));        // longer slope for taller ramps
+    const top  = Math.round(28 + Math.random()*70);                   // flat crest length
+    level.features.push({ type:'ramp', x:Math.round(nextRampX), run, top, rise });
+    nextRampX += run*2 + top + (300 + Math.random()*560);             // flat gap before the next
+  }
 }
 
 // Surface Y at a given world X. Lower number = higher up on screen.
@@ -183,7 +204,6 @@ function resize(){
   W=wrap.clientWidth; H=wrap.clientHeight; DPR=Math.min(window.devicePixelRatio||1,2);
   cv.width=W*DPR; cv.height=H*DPR; ctx.setTransform(DPR,0,0,DPR,0,0);
   groundY = H - GRID*1.5;
-  buildLevel();
 }
 window.addEventListener('resize',resize);
 
@@ -378,13 +398,18 @@ let motorLife=0, motorFull=0, motorPower=0;
 function startPlay(){
   if(placed.length===0){ flash("Build something first! 🧱"); return; }
   buildPhysics();
+  resetLevel(); ensureRamps(W*2);        // fresh endless course of ramps for this run
+  bestDist=0; distBadge.textContent='🏁 0 m';
   mode='play'; goBtn.classList.add('playing'); goBtn.innerHTML='■ STOP';
   tray.classList.add('hidden');          // more room for the action while playing
+  distBadge.classList.add('show');       // live distance readout
 }
 function stop(){
   mode='build'; goBtn.classList.remove('playing'); goBtn.innerHTML='▶ GO!';
   bodies=[];sticks=[];groups=[];wheelsList=[];boosters=[];motors=[];
   tray.classList.remove('hidden');       // bring the parts back to keep building
+  distBadge.classList.remove('show');
+  if(bestDist > GRID) flashBig('🏁 '+Math.round(bestDist/GRID)+' m!', 'Great ride!');
 }
 goBtn.addEventListener('click',(e)=>{ e.stopPropagation(); mode==='build'?startPlay():stop(); });
 
@@ -589,7 +614,7 @@ function physicsStep(){
 }
 
 /* ---------- distance traveled & celebration ---------- */
-let startCx=null, celebrated=false;
+let startCx=null, celebrated=false, bestDist=0;
 function rigCenterX(){ if(!bodies.length)return 0; let s=0; for(const b of bodies)s+=b.x; return s/bodies.length; }
 
 /* ============================================================
@@ -635,7 +660,16 @@ function drawBackground(camX, rigSpeed, zoom){
     (bx)=>cloud(bx+220, 120, .65),
   ]);
 
-  ctx.restore();   // end scenery zoom — sky/hills/clouds done
+  // --- birds (0.28x) glide across the sky, flapping, appearing with the road ---
+  const bSpace=360, bScroll=camX*0.28, bOff=((bScroll%bSpace)+bSpace)%bSpace, bt=performance.now()*0.005;
+  for(let bx=-bSpace-bOff; bx<W+bSpace; bx+=bSpace){
+    const i=Math.round((bx+bScroll)/bSpace);           // stable id per bird (steady height)
+    const by=50 + ((i*47)%95);
+    bird(bx+70,  by,    Math.sin(bt+i));
+    bird(bx+116, by+20, Math.sin(bt+i+1.3));           // a little buddy flying alongside
+  }
+
+  ctx.restore();   // end scenery zoom — sky/hills/clouds/birds done
 
   // --- ground band (full screen, never zoomed, so no gap at the bottom) ---
   ctx.fillStyle=getCSS('--ground');
@@ -718,6 +752,16 @@ function tuft(x,gy){
   ctx.stroke();
 }
 function cloud(x,y,s){ ctx.fillStyle='rgba(255,255,255,.7)';ctx.beginPath();ctx.arc(x,y,22*s,0,7);ctx.arc(x+24*s,y+6*s,17*s,0,7);ctx.arc(x-22*s,y+6*s,15*s,0,7);ctx.rect(x-22*s,y,46*s,16*s);ctx.fill(); }
+// a little seagull "m" shape; phase (-1..1) flaps the wings up and down
+function bird(x,y,phase){
+  const dip=4+phase*4;
+  ctx.strokeStyle='rgba(58,46,69,.5)';ctx.lineWidth=2.5;ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(x-11,y);
+  ctx.quadraticCurveTo(x-5,y-dip,x,y);
+  ctx.quadraticCurveTo(x+5,y-dip,x+11,y);
+  ctx.stroke();
+}
 function getCSS(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 
 // Draw terrain features (ramps) as solid earth wedges sitting on the ground.
@@ -727,8 +771,9 @@ function drawTerrain(camX){
   for(const f of level.features){
     if(f.type!=='ramp') continue;
     const upEnd=f.x+f.run, topEnd=upEnd+f.top, downEnd=topEnd+f.run;
-    // cull if entirely off-screen
-    if(downEnd < camX-40 || f.x > camX+W+40) continue;
+    // cull only well outside the view (wide right margin covers the zoomed-out view
+    // and lets ramps render before they scroll in instead of popping at the edge)
+    if(downEnd < camX-W*0.5 || f.x > camX+W*2) continue;
     const yTop=groundY - f.rise;
     ctx.fillStyle=g;
     ctx.beginPath();
@@ -927,12 +972,13 @@ function loop(){
  try{
   if(mode==='play'){
     physicsStep();
-    if(startCx===null){ startCx=rigCenterX(); celebrated=false; camX=0; lastRigX=startCx; }
+    if(startCx===null){ startCx=rigCenterX(); celebrated=false; camX=0; lastRigX=startCx; bestDist=0; }
 
     const rx=rigCenterX();
     // camera target so the rig sits at ANCHOR of the viewport; never scroll left of 0
     const targetCam=Math.max(0, rx - W*ANCHOR);
     camX += (targetCam-camX)*0.12;           // smooth follow
+    ensureRamps(camX + W*2);                 // keep new ramps appearing ahead of the road
 
     // measure speed (world px/frame) for streaks + bg intensity
     const inst=Math.abs(rx-lastRigX); lastRigX=rx;
@@ -960,12 +1006,16 @@ function loop(){
     ctx.restore();
 
     const dist=rx-startCx;
+    // meters ridden — furthest point reached (GRID px ≈ 1 m), shown live
+    bestDist=Math.max(bestDist, dist);
+    distBadge.textContent='🏁 '+Math.round(bestDist/GRID)+' m';
     if(dist>W*0.9 && !celebrated){ celebrated=true; flashBig("🎉 Amazing rig!","Look at it go!"); }
     if(hasMotor && motorLife===0 && !motorDone){ motorDone=true; flash("Motor wound down — press STOP to build again 🔋"); }
   } else {
     startCx=null; camX=0; rigSpeedSmooth=0; motorDone=false; zoom=1;
+    ensureRamps(W*2);   // make sure ramps within the build view exist
     drawBackground(0, 0, 1);
-    drawTerrain(0);     // show the ramp in build mode too, so kids know it's there
+    drawTerrain(0);     // show ramps in build mode too, so kids know they're there
     drawBuild();
   }
  }catch(err){ console.error('loop frame error:',err); }
@@ -984,6 +1034,8 @@ function flashBig(msg,sub){
 }
 updateHistoryButtons();
 resize();
+resetLevel();          // seed the endless course once the canvas size is known
+ensureRamps(W*2);
 loop();
 
 /* friendly first-time tips cycle */
